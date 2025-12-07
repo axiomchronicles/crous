@@ -187,8 +187,8 @@ Details TBD until v3.0 development begins.
 
 - **Version-specific issues**: Include version in bug reports
 - **Compatibility questions**: Ask in Discussions
-- **Deprecation warnings**: Check [CHANGELOG](../../CHANGELOG.md)
+- **Deprecation warnings**: Check [CHANGELOG](https://github.com/axiomchronicles/crous/blob/main/CHANGELOG.md)
 
 ## Changelog
 
-See [CHANGELOG.md](../../CHANGELOG.md) for detailed version history.
+See [CHANGELOG.md](https://github.com/axiomchronicles/crous/blob/main/CHANGELOG.md) for detailed version history.
