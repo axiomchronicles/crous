@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=60.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crous"
+version = "2.0.0"
+description = "High-performance binary serialization format for Python"
+readme = "README.md"
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [
+    {name = "Crous Contributors", email = "support@crous.dev"}
+]
+keywords = [
+    "serialization",
+    "binary",
+    "encoding",
+    "decoding",
+    "compression",
+    "format",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: C",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/crous-project/crous"
+Documentation = "https://crous.readthedocs.io"
+Repository = "https://github.com/crous-project/crous.git"
+Issues = "https://github.com/crous-project/crous/issues"
+Changelog = "https://github.com/crous-project/crous/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+packages = ["crous"]
+
+[tool.black]
+line-length = 100
+target-version = ['py36', 'py37', 'py38', 'py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # Directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_glob = [".venv"]
+known_first_party = ["crous"]
+
+[tool.mypy]
+python_version = "3.6"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-ra -q --strict-markers"
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["crous"]
+omit = ["*/tests/*", "*/test_*.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
