@@ -1,5 +1,6 @@
 #include "../include/crous_binary.h"
 #include "../include/crous_value.h"
+#include "../include/crous_flux.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -471,14 +472,8 @@ crous_err_t crous_encode_stream(
     if (!value || !out || out->write == NULL)
         return CROUS_ERR_INVALID_TYPE;
     
-    uint8_t header[6] = {
-        CROUS_MAGIC_0, CROUS_MAGIC_1, CROUS_MAGIC_2, CROUS_MAGIC_3,
-        CROUS_VERSION, 0x00
-    };
-    crous_err_t err = stream_write(out, header, 6);
-    if (err != CROUS_OK) return err;
-    
-    return encode_value_to_stream(value, out);
+    /* Use FLUX binary format as primary encoding */
+    return flux_serialize_binary(value, out);
 }
 
 crous_err_t crous_decode_stream(
@@ -488,10 +483,59 @@ crous_err_t crous_decode_stream(
     if (!in || in->read == NULL || !out_value)
         return CROUS_ERR_INVALID_TYPE;
     
+    /* Peek at header to determine format */
     uint8_t header[6];
     crous_err_t err = stream_read(in, header, 6);
     if (err != CROUS_OK) return err;
     
+    /* Check for FLUX format first */
+    if (header[0] == 'F' && header[1] == 'L' && header[2] == 'U' && header[3] == 'X') {
+        if (header[4] != 1) {
+            return CROUS_ERR_INVALID_HEADER;  /* Unsupported FLUX version */
+        }
+        
+        /* Read the rest of the data to decode with FLUX */
+        /* We need to use flux_decode_binary which expects the full buffer */
+        /* This is a limitation of the streaming API - for now, we'll buffer the data */
+        
+        /* Get remaining data size - we can't know this in streaming, 
+           so we'll use a hybrid approach: buffer everything and use flux_decode_binary */
+        size_t buffer_cap = 4096;
+        uint8_t *full_buf = malloc(buffer_cap);
+        if (!full_buf) return CROUS_ERR_OOM;
+        
+        /* Copy the header we already read */
+        memcpy(full_buf, header, 6);
+        size_t pos = 6;
+        
+        /* Read remaining data */
+        uint8_t temp_buf[4096];
+        while (1) {
+            size_t read = in->read(in->user_data, temp_buf, sizeof(temp_buf));
+            if (read == 0) break;
+            
+            if (pos + read > buffer_cap) {
+                size_t new_cap = buffer_cap * 2;
+                while (new_cap < pos + read) new_cap *= 2;
+                uint8_t *new_buf = realloc(full_buf, new_cap);
+                if (!new_buf) {
+                    free(full_buf);
+                    return CROUS_ERR_OOM;
+                }
+                full_buf = new_buf;
+                buffer_cap = new_cap;
+            }
+            
+            memcpy(full_buf + pos, temp_buf, read);
+            pos += read;
+        }
+        
+        err = flux_decode_binary(full_buf, pos, out_value);
+        free(full_buf);
+        return err;
+    }
+    
+    /* Fall back to old CROUS format */
     if (header[0] != CROUS_MAGIC_0 || header[1] != CROUS_MAGIC_1 ||
         header[2] != CROUS_MAGIC_2 || header[3] != CROUS_MAGIC_3) {
         return CROUS_ERR_INVALID_HEADER;
@@ -566,32 +610,8 @@ crous_err_t crous_encode(
     uint8_t **out_buf,
     size_t *out_size) {
     
-    crous_output_stream out;
-    buffer_output_stream_state *state = malloc(sizeof(*state));
-    if (!state) return CROUS_ERR_OOM;
-    
-    state->data = malloc(64);
-    if (!state->data) {
-        free(state);
-        return CROUS_ERR_OOM;
-    }
-    state->len = 0;
-    state->cap = 64;
-    out.user_data = state;
-    out.write = buffer_output_write;
-    
-    crous_err_t err = crous_encode_stream(value, &out);
-    if (err != CROUS_OK) {
-        free(state->data);
-        free(state);
-        return err;
-    }
-    
-    *out_buf = state->data;
-    *out_size = state->len;
-    free(state);
-    
-    return CROUS_OK;
+    /* Use FLUX binary encoding as primary format */
+    return flux_encode_binary(value, out_buf, out_size);
 }
 
 crous_err_t crous_decode(
@@ -599,19 +619,33 @@ crous_err_t crous_decode(
     size_t buf_size,
     crous_value **out_value) {
     
-    crous_input_stream in;
-    buffer_input_stream_state *state = malloc(sizeof(*state));
-    if (!state) return CROUS_ERR_OOM;
+    if (!buf || !out_value || buf_size < 6) return CROUS_ERR_TRUNCATED;
     
-    state->data = buf;
-    state->pos = 0;
-    state->len = buf_size;
-    in.user_data = state;
-    in.read = buffer_input_read;
+    /* Check format by magic bytes */
+    if (buf[0] == 'F' && buf[1] == 'L' && buf[2] == 'U' && buf[3] == 'X') {
+        /* FLUX format */
+        return flux_decode_binary(buf, buf_size, out_value);
+    }
     
-    crous_err_t err = crous_decode_stream(&in, out_value);
-    free(state);
-    return err;
+    if (buf[0] == CROUS_MAGIC_0 && buf[1] == CROUS_MAGIC_1 &&
+        buf[2] == CROUS_MAGIC_2 && buf[3] == CROUS_MAGIC_3) {
+        /* Old CROUS format - use old decoder */
+        crous_input_stream in;
+        buffer_input_stream_state *state = malloc(sizeof(*state));
+        if (!state) return CROUS_ERR_OOM;
+        
+        state->data = buf;
+        state->pos = 0;
+        state->len = buf_size;
+        in.user_data = state;
+        in.read = buffer_input_read;
+        
+        crous_err_t err = decode_value_from_stream(&in, out_value, 0);
+        free(state);
+        return err;
+    }
+    
+    return CROUS_ERR_INVALID_HEADER;
 }
 
 /* ============================================================================

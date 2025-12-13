@@ -42,6 +42,9 @@ crous_extension = Extension(
         'crous/src/c/lexer/lexer.c',
         'crous/src/c/parser/parser.c',
         'crous/src/c/binary/binary.c',
+        'crous/src/c/flux/flux_lexer.c',
+        'crous/src/c/flux/flux_parser.c',
+        'crous/src/c/flux/flux_serializer.c',
     ],
     include_dirs=['crous/include'],
     extra_compile_args=[
