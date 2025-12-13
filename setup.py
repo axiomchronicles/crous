@@ -18,7 +18,7 @@ class build_ext(_build_ext):
         pattern = os.path.join(build_lib, 'crous', 'crous*.so')
         
         for so_file in glob.glob(pattern):
-            dest = os.path.join(here, os.path.basename(so_file))
+            dest = os.path.join(here, 'crous', os.path.basename(so_file))
             print(f"Copying {so_file} to {dest}")
             shutil.copy2(so_file, dest)
     
@@ -34,10 +34,16 @@ if os.path.exists(readme_path):
 crous_extension = Extension(
     'crous.crous',                  
     sources=[
-        'crous/pycrous.c',      
-        'crous/crous.c',        
+        'crous/pycrous.c',
+        'crous/src/c/core/errors.c',
+        'crous/src/c/core/arena.c',
+        'crous/src/c/core/value.c',
+        'crous/src/c/utils/token.c',
+        'crous/src/c/lexer/lexer.c',
+        'crous/src/c/parser/parser.c',
+        'crous/src/c/binary/binary.c',
     ],
-    include_dirs=['crous'],
+    include_dirs=['crous/include'],
     extra_compile_args=[
         '-O3',                
         '-Wall',              
