@@ -1,0 +1,58 @@
+{
+  "name": "crous",
+  "version": "1.0.2",
+  "description": "Crous: High-performance binary serialization format for Node.js",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "keywords": [
+    "serialization",
+    "binary",
+    "encoding",
+    "decoding",
+    "msgpack",
+    "protobuf",
+    "fast",
+    "native",
+    "performance"
+  ],
+  "author": "Pawan Kumar <aegis.invincible@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/axiomchronicles/crous.git"
+  },
+  "bugs": {
+    "url": "https://github.com/axiomchronicles/crous/issues"
+  },
+  "homepage": "https://github.com/axiomchronicles/crous#readme",
+  "scripts": {
+    "install": "node-gyp rebuild",
+    "build": "node-gyp rebuild",
+    "test": "node test/test_basic.js && node test/test_advanced.js",
+    "test:basic": "node test/test_basic.js",
+    "test:advanced": "node test/test_advanced.js",
+    "test:performance": "node test/test_performance.js",
+    "test:compat": "node test/test_python_compat.js",
+    "test:all": "npm run test:basic && npm run test:advanced && npm run test:performance && npm run test:compat",
+    "clean": "node-gyp clean"
+  },
+  "gypfile": true,
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.0"
+  },
+  "files": [
+    "binding.gyp",
+    "index.js",
+    "index.d.ts",
+    "src/",
+    "crous_core/",
+    "README.md",
+    "LICENSE"
+  ]
+}
