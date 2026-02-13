@@ -137,9 +137,26 @@ static crous_err_t serialize_value_text(flux_text_context_t *ctx, const crous_va
         case CROUS_TYPE_STRING:
             return serialize_string(ctx, v);
         
-        case CROUS_TYPE_BYTES:
-            /* Bytes as hex-encoded string */
-            return write_text(ctx->out, "null", 4);  /* TODO: hex encoding */
+        case CROUS_TYPE_BYTES: {
+            /* Bytes as hex-encoded string with @bytes prefix */
+            size_t len;
+            const uint8_t *data = crous_value_get_bytes(v, &len);
+            
+            /* Write @bytes"..." format */
+            if (write_text(ctx->out, "@bytes\"", 7) != CROUS_OK) return CROUS_ERR_STREAM;
+            
+            /* Write each byte as two hex characters */
+            static const char hex_chars[] = "0123456789abcdef";
+            for (size_t i = 0; i < len; i++) {
+                char hex[2];
+                hex[0] = hex_chars[(data[i] >> 4) & 0x0F];
+                hex[1] = hex_chars[data[i] & 0x0F];
+                if (write_text(ctx->out, hex, 2) != CROUS_OK) return CROUS_ERR_STREAM;
+            }
+            
+            if (write_text(ctx->out, "\"", 1) != CROUS_OK) return CROUS_ERR_STREAM;
+            return CROUS_OK;
+        }
         
         case CROUS_TYPE_LIST:
             return serialize_array_text(ctx, v);
@@ -243,6 +260,8 @@ enum {
     FLUX_TAG_BYTES = 0x06,
     FLUX_TAG_LIST = 0x07,
     FLUX_TAG_DICT = 0x08,
+    FLUX_TAG_TAGGED = 0x09,
+    FLUX_TAG_TUPLE = 0x0A,
 };
 
 static crous_err_t serialize_value_binary(flux_binary_context_t *ctx, const crous_value *v) {
@@ -318,6 +337,26 @@ static crous_err_t serialize_value_binary(flux_binary_context_t *ctx, const crou
             err = binary_write(ctx, &tag, 1);
             if (err != CROUS_OK) return err;
             return serialize_record_binary(ctx, v);
+        }
+        
+        case CROUS_TYPE_TAGGED: {
+            tag = FLUX_TAG_TAGGED;
+            err = binary_write(ctx, &tag, 1);
+            if (err != CROUS_OK) return err;
+            
+            /* Write the tag number */
+            err = binary_write_varint(ctx, v->data.tagged.tag);
+            if (err != CROUS_OK) return err;
+            
+            /* Write the inner value */
+            return serialize_value_binary(ctx, v->data.tagged.value);
+        }
+        
+        case CROUS_TYPE_TUPLE: {
+            tag = FLUX_TAG_TUPLE;
+            err = binary_write(ctx, &tag, 1);
+            if (err != CROUS_OK) return err;
+            return serialize_array_binary(ctx, v);
         }
         
         default:
@@ -734,6 +773,33 @@ static crous_err_t deserialize_value_binary(flux_decode_buf_t *ctx, crous_value 
         case FLUX_TAG_DICT:
             err = deserialize_dict_binary(ctx, &v, depth);
             if (err != CROUS_OK) return err;
+            break;
+        
+        case FLUX_TAG_TAGGED: {
+            /* Read the tag number */
+            uint64_t tag_num;
+            err = binary_read_varint(ctx, &tag_num);
+            if (err != CROUS_OK) return err;
+            
+            /* Read the inner value */
+            crous_value *inner;
+            err = deserialize_value_binary(ctx, &inner, depth + 1);
+            if (err != CROUS_OK) return err;
+            
+            v = crous_value_new_tagged((uint32_t)tag_num, inner);
+            if (!v) {
+                crous_value_free_tree(inner);
+                return CROUS_ERR_OOM;
+            }
+            break;
+        }
+        
+        case FLUX_TAG_TUPLE:
+            /* Tuples are stored like lists, just with different type */
+            err = deserialize_array_binary(ctx, &v, depth);
+            if (err != CROUS_OK) return err;
+            /* Convert list to tuple by changing type */
+            if (v) v->type = CROUS_TYPE_TUPLE;
             break;
         
         default:

@@ -1,9 +1,8 @@
-#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <crous.h>
+#include "include/crous.h"
 
 /* ============================================================================
    PYTHON MODULE ERRORS
@@ -50,30 +49,24 @@ static crous_value* try_custom_serializer(PyObject *obj, PyObject *default_func,
     *handled = 0;
     
     if (!custom_serializers || PyDict_Size(custom_serializers) == 0) {
-        /* No custom serializers registered, try default_func */
-        if (!default_func || default_func == Py_None) {
-            return NULL;
-        }
+        return NULL;
     }
     
     /* Get the type of the object */
-    PyTypeObject *obj_type = Py_TYPE(obj);
-    PyObject *serializer = NULL;
+    PyObject *obj_type = (PyObject *)Py_TYPE(obj);
     
-    if (custom_serializers) {
-        /* Look up serializer for this type */
-        serializer = PyDict_GetItem(custom_serializers, (PyObject *)obj_type);
-        
-        if (!serializer) {
-            /* Try checking base classes using tp_mro */
-            PyObject *mro = obj_type->tp_mro;
-            if (mro && PyTuple_Check(mro)) {
-                Py_ssize_t mro_len = PyTuple_Size(mro);
-                for (Py_ssize_t i = 0; i < mro_len; i++) {
-                    PyObject *base = PyTuple_GetItem(mro, i);
-                    serializer = PyDict_GetItem(custom_serializers, base);
-                    if (serializer) break;
-                }
+    /* Look up serializer for this type */
+    PyObject *serializer = PyDict_GetItem(custom_serializers, obj_type);
+    
+    if (!serializer) {
+        /* Try checking base classes (MRO lookup) */
+        PyObject *mro = PyType_GetMro((PyTypeObject *)obj_type);
+        if (mro) {
+            Py_ssize_t mro_len = PyTuple_Size(mro);
+            for (Py_ssize_t i = 0; i < mro_len; i++) {
+                PyObject *base = PyTuple_GetItem(mro, i);
+                serializer = PyDict_GetItem(custom_serializers, base);
+                if (serializer) break;
             }
         }
     }
@@ -98,11 +91,9 @@ static crous_value* try_custom_serializer(PyObject *obj, PyObject *default_func,
     
     /* Get the tag for this type */
     uint32_t tag = 100;  /* Default custom tag */
-    if (type_to_tag) {
-        PyObject *tag_obj = PyDict_GetItem(type_to_tag, (PyObject *)obj_type);
-        if (tag_obj && PyLong_Check(tag_obj)) {
-            tag = (uint32_t)PyLong_AsUnsignedLong(tag_obj);
-        }
+    PyObject *tag_obj = PyDict_GetItem(type_to_tag, obj_type);
+    if (tag_obj && PyLong_Check(tag_obj)) {
+        tag = (uint32_t)PyLong_AsUnsignedLong(tag_obj);
     }
     
     /* Recursively convert the result */
@@ -1057,7 +1048,7 @@ static PyObject* py_unregister_decoder(PyObject *self, PyObject *args) {
    ============================================================================ */
 
 static PyMethodDef crous_methods[] = {
-    {"dumps", (PyCFunction)(void(*)(void))py_dumps, METH_VARARGS | METH_KEYWORDS, 
+    {"dumps", (PyCFunction)py_dumps, METH_VARARGS | METH_KEYWORDS, 
      "Encode Python object to CROUS binary format.\n\n"
      "Args:\n"
      "    obj: Python object to serialize\n"
@@ -1066,7 +1057,7 @@ static PyMethodDef crous_methods[] = {
      "    allow_custom: Whether to allow custom types (default True)\n\n"
      "Returns:\n"
      "    bytes: Binary encoded data"},
-    {"loads", (PyCFunction)(void(*)(void))py_loads, METH_VARARGS | METH_KEYWORDS, 
+    {"loads", (PyCFunction)py_loads, METH_VARARGS | METH_KEYWORDS, 
      "Decode CROUS binary format to Python object.\n\n"
      "Args:\n"
      "    data: Bytes to decode\n"
@@ -1074,20 +1065,20 @@ static PyMethodDef crous_methods[] = {
      "    decoder: Optional decoder instance (reserved)\n\n"
      "Returns:\n"
      "    Deserialized Python object"},
-    {"dump", (PyCFunction)(void(*)(void))py_dump, METH_VARARGS | METH_KEYWORDS, 
+    {"dump", (PyCFunction)py_dump, METH_VARARGS | METH_KEYWORDS, 
      "Serialize object to file.\n\n"
      "Args:\n"
      "    obj: Python object to serialize\n"
      "    fp: File-like object with write() method\n"
      "    default: Optional callable for custom types"},
-    {"load", (PyCFunction)(void(*)(void))py_load, METH_VARARGS | METH_KEYWORDS, 
+    {"load", (PyCFunction)py_load, METH_VARARGS | METH_KEYWORDS, 
      "Deserialize object from file.\n\n"
      "Args:\n"
      "    fp: File-like object with read() method\n"
      "    object_hook: Optional callable for dict post-processing"},
-    {"dumps_stream", (PyCFunction)(void(*)(void))py_dumps_stream, METH_VARARGS | METH_KEYWORDS, 
+    {"dumps_stream", (PyCFunction)py_dumps_stream, METH_VARARGS | METH_KEYWORDS, 
      "Serialize object to stream (same as dump for file objects)."},
-    {"loads_stream", (PyCFunction)(void(*)(void))py_loads_stream, METH_VARARGS | METH_KEYWORDS, 
+    {"loads_stream", (PyCFunction)py_loads_stream, METH_VARARGS | METH_KEYWORDS, 
      "Deserialize object from stream (same as load for file objects)."},
     {"register_serializer", py_register_serializer, METH_VARARGS, 
      "Register a custom serializer for a Python type.\n\n"

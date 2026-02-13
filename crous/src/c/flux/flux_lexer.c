@@ -275,19 +275,24 @@ flux_token_t* flux_lexer_peek(flux_lexer_t *lexer) {
     int saved_line = lexer->line;
     int saved_column = lexer->column;
     int saved_indent_size = lexer->indent_stack_size;
+    int saved_indent_level = lexer->indent_level;
     int saved_indent_stack[256];
     memcpy(saved_indent_stack, lexer->indent_stack, sizeof(lexer->indent_stack));
     
-    /* Get next token */
+    /* Get next token and save result */
     flux_token_t *token = flux_lexer_next(lexer);
-    flux_token_t result = *token;
+    flux_token_t peeked_token = *token;
     
-    /* Restore state */
+    /* Restore lexer state */
     lexer->pos = saved_pos;
     lexer->line = saved_line;
     lexer->column = saved_column;
     lexer->indent_stack_size = saved_indent_size;
+    lexer->indent_level = saved_indent_level;
     memcpy(lexer->indent_stack, saved_indent_stack, sizeof(lexer->indent_stack));
+    
+    /* Store peeked token in current_token so it can be returned safely */
+    lexer->current_token = peeked_token;
     
     return &lexer->current_token;
 }

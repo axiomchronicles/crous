@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include ARCHITECTURE.md
+include FLUX_SPECIFICATION.md
+recursive-include crous/include *.h
+recursive-include crous/src *.c

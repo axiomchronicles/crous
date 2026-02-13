@@ -31,6 +31,31 @@ def test_flux_format():
     print(f"✓ Encoded size: {len(encoded)} bytes")
     return True
 
+
+def test_flux_format():
+    """Verify that new files are encoded with FLUX format."""
+    test_data = {
+        "name": "Test",
+        "values": [1, 2, 3],
+        "nested": {"key": "value"}
+    }
+    
+    # Encode with new format (should be FLUX)
+    encoded = crous.dumps(test_data)
+    
+    # Check magic bytes for FLUX format
+    assert encoded[:4] == b'FLUX', f"Expected FLUX magic bytes, got {encoded[:4]}"
+    print(f"✓ FLUX magic bytes detected: {encoded[:4]}")
+    
+    # Decode and verify
+    decoded = crous.loads(encoded)
+    assert decoded == test_data
+    print(f"✓ Data correctly decoded from FLUX format")
+    
+    # Verify that decoding works
+    print(f"✓ Encoded size: {len(encoded)} bytes")
+    return True
+
 def test_bytes_support():
     """Verify that bytes are supported in FLUX format."""
     test_data = {

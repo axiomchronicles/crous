@@ -38,6 +38,7 @@ crous_extension = Extension(
         'crous/src/c/core/errors.c',
         'crous/src/c/core/arena.c',
         'crous/src/c/core/value.c',
+        'crous/src/c/core/version.c',
         'crous/src/c/utils/token.c',
         'crous/src/c/lexer/lexer.c',
         'crous/src/c/parser/parser.c',
@@ -58,7 +59,7 @@ crous_extension = Extension(
 
 setup(
     name="crous",
-    version="1.0.0",
+    version="1.0.3",
     description="Crous: High-performance binary serialization format for Python",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -67,7 +68,7 @@ setup(
     url="https://github.com/axiomchronicles/crous",
     license="MIT",
     
-    packages=find_packages(exclude=["tests", "tests.*", "crous-docx"]),
+    packages=find_packages(exclude=["tests", "tests.*", "crous-docx", "crous.src", "crous.src.*"]),
     
     ext_modules=[crous_extension],
     
