@@ -1,7 +1,6 @@
 [build]
   base = "crousDocs"
   command = "npm install && npm run build"
-  publish = ".netlify/deploy"
 
 [build.environment]
   NODE_VERSION = "20"
