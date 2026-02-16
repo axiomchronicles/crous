@@ -1,1235 +1,1501 @@
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <pythread.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <crous.h>
+
+/* ============================================================================
+   PYTHON MODULE ERRORS
+   ============================================================================ */
 
 static PyObject *CrousError = NULL;
 static PyObject *CrousEncodeError = NULL;
 static PyObject *CrousDecodeError = NULL;
 
-// registry vibes
-static PyObject *_serializer_registry = NULL;
-static PyObject *_decoder_registry = NULL;
+/* ============================================================================
+   CUSTOM SERIALIZER/DECODER REGISTRIES
+   ============================================================================ */
 
-// type codes fr fr
-#define CROUS_TYPE_NULL       0x00
-#define CROUS_TYPE_BOOL_FALSE 0x01
-#define CROUS_TYPE_BOOL_TRUE  0x02
-#define CROUS_TYPE_INT        0x03
-#define CROUS_TYPE_FLOAT      0x04
-#define CROUS_TYPE_STR        0x05
-#define CROUS_TYPE_BYTES      0x06
-#define CROUS_TYPE_LIST       0x07
-#define CROUS_TYPE_DICT       0x08
+/* Lock protecting all registry operations (thread-safety C-3 fix) */
+static PyThread_type_lock registry_lock = NULL;
 
-// magic sauce
-#define CROUS_MAGIC           0x4352 
-#define CROUS_VERSION         0x02
+/* Dictionary mapping Python types to serializer functions */
+static PyObject *custom_serializers = NULL;
 
-// buffer era
-typedef struct {
-    uint8_t *data;
-    size_t pos;
-    size_t capacity;
-} Buffer;
+/* Dictionary mapping tag integers to decoder functions */
+static PyObject *custom_decoders = NULL;
 
-// spawn new buffer no cap
-static Buffer* buffer_create(size_t initial_size) {
-    Buffer *buf = (Buffer *)malloc(sizeof(Buffer));
-    if (!buf) return NULL;
+/* Tag counter for auto-assignment */
+static uint32_t next_custom_tag = 100;
+
+/* Dictionary mapping Python types to their assigned tags */
+static PyObject *type_to_tag = NULL;
+
+/* Acquire/release helpers for registry lock */
+static inline void registry_lock_acquire(void) {
+    if (registry_lock) PyThread_acquire_lock(registry_lock, WAIT_LOCK);
+}
+static inline void registry_lock_release(void) {
+    if (registry_lock) PyThread_release_lock(registry_lock);
+}
+
+/* ============================================================================
+   FORWARD DECLARATIONS
+   ============================================================================ */
+
+static crous_value* pyobj_to_crous_with_default(PyObject *obj, PyObject *default_func, crous_err_t *err);
+static PyObject* crous_to_pyobj_with_hook(const crous_value *v, PyObject *object_hook);
+
+/* ============================================================================
+   CUSTOM SERIALIZER IMPLEMENTATION
+   ============================================================================ */
+
+/**
+ * Try to serialize an object using custom serializers.
+ * Returns: new crous_value* on success, NULL if no custom serializer or on error.
+ * Sets *handled = 1 if a custom serializer was found (even if it failed).
+ */
+static crous_value* try_custom_serializer(PyObject *obj, PyObject *default_func, 
+                                          crous_err_t *err, int *handled) {
+    *handled = 0;
     
-    buf->data = (uint8_t *)malloc(initial_size);
-    if (!buf->data) {
-        free(buf);
+    registry_lock_acquire();
+    
+    if (!custom_serializers || PyDict_Size(custom_serializers) == 0) {
+        /* No custom serializers registered, try default_func */
+        if (!default_func || default_func == Py_None) {
+            registry_lock_release();
+            return NULL;
+        }
+    }
+    
+    /* Get the type of the object */
+    PyTypeObject *obj_type = Py_TYPE(obj);
+    PyObject *serializer = NULL;
+    
+    if (custom_serializers) {
+        /* Look up serializer for this type */
+        serializer = PyDict_GetItem(custom_serializers, (PyObject *)obj_type);
+        
+        if (!serializer) {
+            /* Try checking base classes using tp_mro */
+            PyObject *mro = obj_type->tp_mro;
+            if (mro && PyTuple_Check(mro)) {
+                Py_ssize_t mro_len = PyTuple_Size(mro);
+                for (Py_ssize_t i = 0; i < mro_len; i++) {
+                    PyObject *base = PyTuple_GetItem(mro, i);
+                    serializer = PyDict_GetItem(custom_serializers, base);
+                    if (serializer) break;
+                }
+            }
+        }
+    }
+    
+    if (!serializer && default_func && default_func != Py_None) {
+        /* Use the default function as fallback */
+        serializer = default_func;
+    }
+    
+    if (!serializer) {
+        registry_lock_release();
         return NULL;
     }
     
-    buf->pos = 0;
-    buf->capacity = initial_size;
-    return buf;
-}
-
-// cleanup szn
-static void buffer_free(Buffer *buf) {
-    if (buf) {
-        free(buf->data);
-        free(buf);
-    }
-}
-
-// make room fr
-static int buffer_ensure_capacity(Buffer *buf, size_t needed) {
-    if (buf->pos + needed <= buf->capacity) {
-        return 1;
-    }
-    // double it
-    size_t new_capacity = buf->capacity * 2;
-    while (new_capacity < buf->pos + needed) {
-        new_capacity *= 2;
+    /* Incref serializer before releasing lock so it stays alive */
+    Py_INCREF(serializer);
+    
+    /* Get the tag for this type while we hold the lock */
+    uint32_t tag = 100;  /* Default custom tag */
+    if (type_to_tag) {
+        PyObject *tag_obj = PyDict_GetItem(type_to_tag, (PyObject *)obj_type);
+        if (tag_obj && PyLong_Check(tag_obj)) {
+            tag = (uint32_t)PyLong_AsUnsignedLong(tag_obj);
+        }
     }
     
-    uint8_t *new_data = (uint8_t *)realloc(buf->data, new_capacity);
-    if (!new_data) {
-        return 0;
+    registry_lock_release();
+    
+    *handled = 1;
+    
+    /* Call the serializer function (outside lock to avoid deadlock) */
+    PyObject *result = PyObject_CallFunctionObjArgs(serializer, obj, NULL);
+    Py_DECREF(serializer);
+    if (!result) {
+        *err = CROUS_ERR_ENCODE;
+        return NULL;
     }
     
-    buf->data = new_data;
-    buf->capacity = new_capacity;
-    return 1;
-}
-
-// yeet a byte
-static int buffer_write_u8(Buffer *buf, uint8_t val) {
-    if (!buffer_ensure_capacity(buf, 1)) return 0;
-    buf->data[buf->pos++] = val;
-    return 1;
-}
-
-// 32-bit energy
-static int buffer_write_u32(Buffer *buf, uint32_t val) {
-    if (!buffer_ensure_capacity(buf, 4)) return 0;
-    buf->data[buf->pos++] = (val >> 24) & 0xFF;
-    buf->data[buf->pos++] = (val >> 16) & 0xFF;
-    buf->data[buf->pos++] = (val >> 8) & 0xFF;
-    buf->data[buf->pos++] = val & 0xFF;
-    return 1;
-}
-
-// float go brrr
-static int buffer_write_f64(Buffer *buf, double val) {
-    if (!buffer_ensure_capacity(buf, 8)) return 0;
-    uint8_t *bytes = (uint8_t *)&val;
-    for (int i = 0; i < 8; i++) {
-        buf->data[buf->pos++] = bytes[i];
-    }
-    return 1;
-}
-
-// dump bytes in there
-static int buffer_write_bytes(Buffer *buf, const uint8_t *data, size_t len) {
-    if (!buffer_ensure_capacity(buf, len)) return 0;
-    memcpy(buf->data + buf->pos, data, len);
-    buf->pos += len;
-    return 1;
-}
-
-// encode that data
-static int encode_object(Buffer *buf, PyObject *obj);
-
-// string into bytes no 🧢
-static int encode_string(Buffer *buf, PyObject *str) {
-    Py_ssize_t len;
-    const char *data = PyUnicode_AsUTF8AndSize(str, &len);
-    if (!data) return 0;
+    /* Recursively convert the result */
+    crous_value *inner = pyobj_to_crous_with_default(result, NULL, err);
+    Py_DECREF(result);
     
-    if (!buffer_write_u8(buf, CROUS_TYPE_STR)) return 0;
-    if (!buffer_write_u32(buf, (uint32_t)len)) return 0;
-    if (!buffer_write_bytes(buf, (const uint8_t *)data, len)) return 0;
-    
-    return 1;
-}
-
-// bytes are just bytes fr
-static int encode_bytes(Buffer *buf, PyObject *bytes_obj) {
-    Py_ssize_t len = PyBytes_Size(bytes_obj);
-    if (len < 0) return 0;
-    
-    if (!buffer_write_u8(buf, CROUS_TYPE_BYTES)) return 0;
-    if (!buffer_write_u32(buf, (uint32_t)len)) return 0;
-    if (!buffer_write_bytes(buf, (uint8_t *)PyBytes_AsString(bytes_obj), len)) return 0;
-    
-    return 1;
-}
-
-// loop through the list
-static int encode_list(Buffer *buf, PyObject *list) {
-    Py_ssize_t len = PyList_Size(list);
-    if (len < 0) return 0;
-    
-    if (!buffer_write_u8(buf, CROUS_TYPE_LIST)) return 0;
-    if (!buffer_write_u32(buf, (uint32_t)len)) return 0;
-    
-    // each item gets the treatment
-    for (Py_ssize_t i = 0; i < len; i++) {
-        PyObject *item = PyList_GetItem(list, i);
-        if (!item) return 0;
-        if (!encode_object(buf, item)) return 0;
+    if (!inner) {
+        return NULL;
     }
     
-    return 1;
+    /* Wrap in tagged value */
+    crous_value *tagged = crous_value_new_tagged(tag, inner);
+    if (!tagged) {
+        crous_value_free_tree(inner);
+        *err = CROUS_ERR_OOM;
+        return NULL;
+    }
+    
+    return tagged;
 }
 
-// dict go brrr
-static int encode_dict(Buffer *buf, PyObject *dict) {
-    PyObject *key, *value;
-    Py_ssize_t pos = 0;
-    Py_ssize_t len = PyDict_Size(dict);
+/* ============================================================================
+   PYTHON VALUE -> CROUS VALUE CONVERSION
+   ============================================================================ */
+
+static crous_value* pyobj_to_crous_with_default(PyObject *obj, PyObject *default_func, crous_err_t *err) {
+    *err = CROUS_OK;
     
-    if (!buffer_write_u8(buf, CROUS_TYPE_DICT)) return 0;
-    if (!buffer_write_u32(buf, (uint32_t)len)) return 0;
+    /* None */
+    if (obj == Py_None) {
+        return crous_value_new_null();
+    }
     
-    // keys must be strings periodt
-    while (PyDict_Next(dict, &pos, &key, &value)) {
-        if (!PyUnicode_Check(key)) {
-            PyErr_SetString(CrousEncodeError, "Dict keys must be strings");
-            return 0;
+    /* Booleans (must check before int since bool is subclass of int) */
+    if (PyBool_Check(obj)) {
+        return crous_value_new_bool(obj == Py_True ? 1 : 0);
+    }
+    
+    /* Integers - use proper overflow handling */
+    if (PyLong_Check(obj)) {
+        int overflow = 0;
+        long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
+        
+        if (overflow != 0) {
+            /* Value doesn't fit in long long, try custom serializer or fail */
+            int handled = 0;
+            crous_value *result = try_custom_serializer(obj, default_func, err, &handled);
+            if (handled) return result;
+            
+            PyErr_SetString(CrousEncodeError, "Integer value too large to serialize");
+            *err = CROUS_ERR_OVERFLOW;
+            return NULL;
         }
         
-        if (!encode_string(buf, key)) return 0;
-        if (!encode_object(buf, value)) return 0;
+        if (PyErr_Occurred()) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
+        
+        return crous_value_new_int((int64_t)val);
     }
     
-    return 1;
-}
-
-// main encoding logic
-static int encode_object(Buffer *buf, PyObject *obj) {
-    // the void
-    if (obj == Py_None) {
-        return buffer_write_u8(buf, CROUS_TYPE_NULL);
-    }
-    // cap check
-    else if (obj == Py_True) {
-        return buffer_write_u8(buf, CROUS_TYPE_BOOL_TRUE);
-    }
-    else if (obj == Py_False) {
-        return buffer_write_u8(buf, CROUS_TYPE_BOOL_FALSE);
-    }
-    // number szn
-    else if (PyLong_Check(obj)) {
-        long val = PyLong_AsLong(obj);
-        if (val == -1 && PyErr_Occurred()) return 0;
-        
-        if (!buffer_write_u8(buf, CROUS_TYPE_INT)) return 0;
-        if (!buffer_write_u32(buf, (uint32_t)val)) return 0;
-        return 1;
-    }
-    // decimal vibes
-    else if (PyFloat_Check(obj)) {
+    /* Floats */
+    if (PyFloat_Check(obj)) {
         double val = PyFloat_AsDouble(obj);
-        if (val == -1.0 && PyErr_Occurred()) return 0;
+        if (PyErr_Occurred()) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
+        return crous_value_new_float(val);
+    }
+    
+    /* Strings */
+    if (PyUnicode_Check(obj)) {
+        Py_ssize_t len;
+        const char *data = PyUnicode_AsUTF8AndSize(obj, &len);
+        if (!data) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
+        return crous_value_new_string(data, (size_t)len);
+    }
+    
+    /* Bytes */
+    if (PyBytes_Check(obj)) {
+        char *data;
+        Py_ssize_t len;
+        if (PyBytes_AsStringAndSize(obj, &data, &len) < 0) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
+        return crous_value_new_bytes((uint8_t *)data, (size_t)len);
+    }
+    
+    /* Bytearray */
+    if (PyByteArray_Check(obj)) {
+        char *data = PyByteArray_AsString(obj);
+        Py_ssize_t len = PyByteArray_Size(obj);
+        if (!data) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
+        return crous_value_new_bytes((uint8_t *)data, (size_t)len);
+    }
+    
+    /* Lists */
+    if (PyList_Check(obj)) {
+        Py_ssize_t size = PyList_Size(obj);
+        if (size < 0) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
         
-        // decimal vibes
-        if (!buffer_write_u8(buf, CROUS_TYPE_FLOAT)) return 0;
-        if (!buffer_write_f64(buf, val)) return 0;
-        return 1;
-    }
-    else if (PyUnicode_Check(obj)) {
-        return encode_string(buf, obj);
-    }
-    else if (PyBytes_Check(obj)) {
-        return encode_bytes(buf, obj);
-    }
-    else if (PyList_Check(obj)) {
-        return encode_list(buf, obj);
-    }
-    else if (PyDict_Check(obj)) {
-        return encode_dict(buf, obj);
-    }
-    else {
-        // check for custom handlers
-        if (_serializer_registry != NULL) {
-            PyObject *serializer = PyDict_GetItem(_serializer_registry, (PyObject *)Py_TYPE(obj));
-            if (serializer != NULL) {
-                // invoke it
-                PyObject *result = PyObject_CallFunctionObjArgs(serializer, obj, NULL);
-                if (result == NULL) {
-                    return 0;
-                }
-                
-                // recursive energy
-                int success = encode_object(buf, result);
-                Py_DECREF(result);
-                return success;
+        crous_value *list = crous_value_new_list((size_t)size);
+        if (!list) {
+            *err = CROUS_ERR_OOM;
+            return NULL;
+        }
+        
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyList_GetItem(obj, i);
+            if (!item) {
+                crous_value_free_tree(list);
+                *err = CROUS_ERR_ENCODE;
+                return NULL;
+            }
+            
+            crous_value *citem = pyobj_to_crous_with_default(item, default_func, err);
+            if (*err != CROUS_OK) {
+                crous_value_free_tree(list);
+                return NULL;
+            }
+            
+            if (crous_value_list_append(list, citem) != CROUS_OK) {
+                crous_value_free_tree(list);
+                crous_value_free_tree(citem);
+                *err = CROUS_ERR_OOM;
+                return NULL;
             }
         }
         
-        PyErr_Format(CrousEncodeError, 
-            "Object of type %.100s is not Crous-serializable",
-            Py_TYPE(obj)->tp_name);
-        return 0;
-    }
-}
-
-// decode that data
-
-// reader goes beep boop
-typedef struct {
-    const uint8_t *data;
-    size_t pos;
-    size_t size;
-} Reader;
-
-// grab a byte
-static uint8_t reader_read_u8(Reader *r, int *success) {
-    if (r->pos >= r->size) {
-        *success = 0;
-        return 0;
-    }
-    return r->data[r->pos++];
-}
-
-// read 4 bytes fam
-static uint32_t reader_read_u32(Reader *r, int *success) {
-    if (r->pos + 4 > r->size) {
-        *success = 0;
-        return 0;
-    }
-    uint32_t val = 0;
-    // big endian energy
-    val |= ((uint32_t)r->data[r->pos++]) << 24;
-    val |= ((uint32_t)r->data[r->pos++]) << 16;
-    val |= ((uint32_t)r->data[r->pos++]) << 8;
-    val |= ((uint32_t)r->data[r->pos++]);
-    return val;
-}
-
-// float time
-static double reader_read_f64(Reader *r, int *success) {
-    if (r->pos + 8 > r->size) {
-        *success = 0;
-        return 0.0;
-    }
-    double val;
-    uint8_t *bytes = (uint8_t *)&val;
-    for (int i = 0; i < 8; i++) {
-        bytes[i] = r->data[r->pos++];
-    }
-    return val;
-}
-
-// yoink them bytes
-static const uint8_t* reader_read_bytes(Reader *r, size_t len, int *success) {
-    if (r->pos + len > r->size) {
-        *success = 0;
-        return NULL;
-    }
-    const uint8_t *data = r->data + r->pos;
-    r->pos += len;
-    return data;
-}
-
-static PyObject* decode_object(Reader *r, int *success);
-
-// string decode era
-static PyObject* decode_string(Reader *r, int *success) {
-    uint32_t len = reader_read_u32(r, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated string length");
-        return NULL;
+        return list;
     }
     
-    const uint8_t *data = reader_read_bytes(r, len, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated string data");
-        return NULL;
-    }
-    
-    return PyUnicode_FromStringAndSize((const char *)data, len);
-}
-
-// bytes mode activated
-static PyObject* decode_bytes(Reader *r, int *success) {
-    uint32_t len = reader_read_u32(r, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated bytes length");
-        return NULL;
-    }
-    
-    const uint8_t *data = reader_read_bytes(r, len, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated bytes data");
-        return NULL;
-    }
-    
-    return PyBytes_FromStringAndSize((const char *)data, len);
-}
-
-// list construction szn
-static PyObject* decode_list(Reader *r, int *success) {
-    uint32_t len = reader_read_u32(r, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated list length");
-        return NULL;
-    }
-    
-    PyObject *list = PyList_New(len);
-    if (!list) return NULL;
-    
-    // populate that list
-    for (uint32_t i = 0; i < len; i++) {
-        PyObject *item = decode_object(r, success);
-        if (!*success) {
-            Py_DECREF(list);
-            return NULL;
-        }
-        PyList_SetItem(list, i, item);
-    }
-    
-    return list;
-}
-
-// dict time baby
-static PyObject* decode_dict(Reader *r, int *success) {
-    uint32_t len = reader_read_u32(r, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated dict length");
-        return NULL;
-    }
-    
-    PyObject *dict = PyDict_New();
-    if (!dict) return NULL;
-    
-    // fill it up
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t key_type = reader_read_u8(r, success);
-        if (!*success) {
-            Py_DECREF(dict);
-            PyErr_SetString(CrousDecodeError, "Truncated dict key type");
+    /* Tuples */
+    if (PyTuple_Check(obj)) {
+        Py_ssize_t size = PyTuple_Size(obj);
+        if (size < 0) {
+            *err = CROUS_ERR_ENCODE;
             return NULL;
         }
         
-        if (key_type != CROUS_TYPE_STR) {
-            Py_DECREF(dict);
-            PyErr_SetString(CrousDecodeError, "Dict keys must be strings");
+        crous_value *tuple = crous_value_new_tuple((size_t)size);
+        if (!tuple) {
+            *err = CROUS_ERR_OOM;
             return NULL;
         }
         
-        PyObject *key = decode_string(r, success);
-        if (!*success) {
-            Py_DECREF(dict);
-            return NULL;
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject *item = PyTuple_GetItem(obj, i);
+            if (!item) {
+                crous_value_free_tree(tuple);
+                *err = CROUS_ERR_ENCODE;
+                return NULL;
+            }
+            
+            crous_value *citem = pyobj_to_crous_with_default(item, default_func, err);
+            if (*err != CROUS_OK) {
+                crous_value_free_tree(tuple);
+                return NULL;
+            }
+            
+            if (crous_value_list_append(tuple, citem) != CROUS_OK) {
+                crous_value_free_tree(tuple);
+                crous_value_free_tree(citem);
+                *err = CROUS_ERR_OOM;
+                return NULL;
+            }
         }
         
-        PyObject *value = decode_object(r, success);
-        if (!*success) {
-            Py_DECREF(key);
-            Py_DECREF(dict);
-            return NULL;
-        }
-        
-        PyDict_SetItem(dict, key, value);
-        Py_DECREF(key);
-        Py_DECREF(value);
+        return tuple;
     }
     
-    return dict;
+    /* Dictionaries */
+    if (PyDict_Check(obj)) {
+        crous_value *dict = crous_value_new_dict(0);
+        if (!dict) {
+            *err = CROUS_ERR_OOM;
+            return NULL;
+        }
+        
+        PyObject *key, *value;
+        Py_ssize_t pos = 0;
+        
+        while (PyDict_Next(obj, &pos, &key, &value)) {
+            if (!PyUnicode_Check(key)) {
+                crous_value_free_tree(dict);
+                PyErr_SetString(CrousEncodeError, "Dictionary keys must be strings");
+                *err = CROUS_ERR_INVALID_TYPE;
+                return NULL;
+            }
+            
+            Py_ssize_t klen;
+            const char *kdata = PyUnicode_AsUTF8AndSize(key, &klen);
+            if (!kdata) {
+                crous_value_free_tree(dict);
+                *err = CROUS_ERR_ENCODE;
+                return NULL;
+            }
+            
+            crous_value *cval = pyobj_to_crous_with_default(value, default_func, err);
+            if (*err != CROUS_OK) {
+                crous_value_free_tree(dict);
+                return NULL;
+            }
+            
+            if (crous_value_dict_set_binary(dict, kdata, (size_t)klen, cval) != CROUS_OK) {
+                crous_value_free_tree(dict);
+                crous_value_free_tree(cval);
+                *err = CROUS_ERR_OOM;
+                return NULL;
+            }
+        }
+        
+        return dict;
+    }
+    
+    /* Sets - convert to list with tag */
+    if (PySet_Check(obj) || PyFrozenSet_Check(obj)) {
+        int handled = 0;
+        crous_value *result = try_custom_serializer(obj, default_func, err, &handled);
+        if (handled) return result;
+        
+        /* Default: convert to list */
+        PyObject *as_list = PySequence_List(obj);
+        if (!as_list) {
+            *err = CROUS_ERR_ENCODE;
+            return NULL;
+        }
+        
+        crous_value *list_val = pyobj_to_crous_with_default(as_list, default_func, err);
+        Py_DECREF(as_list);
+        
+        if (*err != CROUS_OK) return NULL;
+        
+        /* Wrap in tagged value with set tag (90 for set, 91 for frozenset) */
+        uint32_t tag = PyFrozenSet_Check(obj) ? 91 : 90;
+        crous_value *tagged = crous_value_new_tagged(tag, list_val);
+        if (!tagged) {
+            crous_value_free_tree(list_val);
+            *err = CROUS_ERR_OOM;
+            return NULL;
+        }
+        return tagged;
+    }
+    
+    /* Try custom serializer for unsupported types */
+    int handled = 0;
+    crous_value *result = try_custom_serializer(obj, default_func, err, &handled);
+    if (handled) return result;
+    
+    /* Unsupported type */
+    PyErr_Format(CrousEncodeError, "Unsupported type for encoding: %s", 
+                 Py_TYPE(obj)->tp_name);
+    *err = CROUS_ERR_INVALID_TYPE;
+    return NULL;
 }
 
-// main decode dispatch
-static PyObject* decode_object(Reader *r, int *success) {
-    uint8_t type = reader_read_u8(r, success);
-    if (!*success) {
-        PyErr_SetString(CrousDecodeError, "Truncated type byte");
-        return NULL;
+/* Legacy function for backwards compatibility */
+static crous_value* pyobj_to_crous(PyObject *obj, crous_err_t *err) {
+    return pyobj_to_crous_with_default(obj, NULL, err);
+}
+
+/* ============================================================================
+   CROUS VALUE -> PYTHON VALUE CONVERSION
+   ============================================================================ */
+
+static PyObject* crous_to_pyobj_with_hook(const crous_value *v, PyObject *object_hook) {
+    if (!v) {
+        Py_RETURN_NONE;
     }
     
-    // type check time
-    switch (type) {
+    switch (crous_value_get_type(v)) {
         case CROUS_TYPE_NULL:
             Py_RETURN_NONE;
         
-        case CROUS_TYPE_BOOL_FALSE:
-            Py_RETURN_FALSE;
-        
-        case CROUS_TYPE_BOOL_TRUE:
-            Py_RETURN_TRUE;
-        
-        case CROUS_TYPE_INT: {
-            uint32_t val = reader_read_u32(r, success);
-            if (!*success) {
-                PyErr_SetString(CrousDecodeError, "Truncated int");
-                return NULL;
+        case CROUS_TYPE_BOOL:
+            if (crous_value_get_bool(v)) {
+                Py_RETURN_TRUE;
+            } else {
+                Py_RETURN_FALSE;
             }
-            return PyLong_FromLong((long)val);
+        
+        case CROUS_TYPE_INT:
+            return PyLong_FromLongLong(crous_value_get_int(v));
+        
+        case CROUS_TYPE_FLOAT:
+            return PyFloat_FromDouble(crous_value_get_float(v));
+        
+        case CROUS_TYPE_STRING: {
+            size_t len;
+            const char *data = crous_value_get_string(v, &len);
+            return PyUnicode_FromStringAndSize(data, (Py_ssize_t)len);
         }
         
-        case CROUS_TYPE_FLOAT: {
-            double val = reader_read_f64(r, success);
-            if (!*success) {
-                PyErr_SetString(CrousDecodeError, "Truncated float");
-                return NULL;
-            }
-            return PyFloat_FromDouble(val);
+        case CROUS_TYPE_BYTES: {
+            size_t len;
+            const uint8_t *data = crous_value_get_bytes(v, &len);
+            return PyBytes_FromStringAndSize((const char *)data, (Py_ssize_t)len);
         }
         
-        case CROUS_TYPE_STR:
-            return decode_string(r, success);
+        case CROUS_TYPE_LIST: {
+            size_t size = crous_value_list_size(v);
+            PyObject *list = PyList_New((Py_ssize_t)size);
+            if (!list) return NULL;
+            
+            for (size_t i = 0; i < size; i++) {
+                PyObject *item = crous_to_pyobj_with_hook(crous_value_list_get(v, i), object_hook);
+                if (!item) {
+                    Py_DECREF(list);
+                    return NULL;
+                }
+                PyList_SetItem(list, (Py_ssize_t)i, item);
+            }
+            return list;
+        }
         
-        case CROUS_TYPE_BYTES:
-            return decode_bytes(r, success);
+        case CROUS_TYPE_TUPLE: {
+            size_t size = crous_value_list_size(v);
+            PyObject *tuple = PyTuple_New((Py_ssize_t)size);
+            if (!tuple) return NULL;
+            
+            for (size_t i = 0; i < size; i++) {
+                PyObject *item = crous_to_pyobj_with_hook(crous_value_list_get(v, i), object_hook);
+                if (!item) {
+                    Py_DECREF(tuple);
+                    return NULL;
+                }
+                PyTuple_SetItem(tuple, (Py_ssize_t)i, item);
+            }
+            return tuple;
+        }
         
-        case CROUS_TYPE_LIST:
-            return decode_list(r, success);
+        case CROUS_TYPE_DICT: {
+            PyObject *dict = PyDict_New();
+            if (!dict) return NULL;
+            
+            size_t size = crous_value_dict_size(v);
+            for (size_t i = 0; i < size; i++) {
+                const crous_dict_entry *entry = crous_value_dict_get_entry(v, i);
+                if (!entry) {
+                    Py_DECREF(dict);
+                    return NULL;
+                }
+                
+                PyObject *key = PyUnicode_FromStringAndSize(entry->key, (Py_ssize_t)entry->key_len);
+                if (!key) {
+                    Py_DECREF(dict);
+                    return NULL;
+                }
+                
+                PyObject *val = crous_to_pyobj_with_hook(entry->value, object_hook);
+                if (!val) {
+                    Py_DECREF(key);
+                    Py_DECREF(dict);
+                    return NULL;
+                }
+                
+                if (PyDict_SetItem(dict, key, val) < 0) {
+                    Py_DECREF(key);
+                    Py_DECREF(val);
+                    Py_DECREF(dict);
+                    return NULL;
+                }
+                
+                Py_DECREF(key);
+                Py_DECREF(val);
+            }
+            
+            /* Apply object_hook if provided */
+            if (object_hook && object_hook != Py_None) {
+                PyObject *result = PyObject_CallFunctionObjArgs(object_hook, dict, NULL);
+                Py_DECREF(dict);
+                return result;
+            }
+            
+            return dict;
+        }
         
-        case CROUS_TYPE_DICT:
-            return decode_dict(r, success);
+        case CROUS_TYPE_TAGGED: {
+            uint32_t tag = crous_value_get_tag(v);
+            const crous_value *inner = crous_value_get_tagged_inner(v);
+            
+            /* Check for built-in tag types */
+            if (tag == 90) {
+                /* Set */
+                PyObject *list = crous_to_pyobj_with_hook(inner, object_hook);
+                if (!list) return NULL;
+                PyObject *set = PySet_New(list);
+                Py_DECREF(list);
+                return set;
+            } else if (tag == 91) {
+                /* Frozenset */
+                PyObject *list = crous_to_pyobj_with_hook(inner, object_hook);
+                if (!list) return NULL;
+                PyObject *fset = PyFrozenSet_New(list);
+                Py_DECREF(list);
+                return fset;
+            }
+            
+            /* Check for custom decoder */
+            if (custom_decoders) {
+                registry_lock_acquire();
+                PyObject *tag_key = PyLong_FromUnsignedLong(tag);
+                PyObject *decoder = NULL;
+                if (tag_key) {
+                    decoder = PyDict_GetItem(custom_decoders, tag_key);
+                    Py_XINCREF(decoder);  /* prevent it from vanishing */
+                    Py_DECREF(tag_key);
+                }
+                registry_lock_release();
+                
+                if (decoder) {
+                    /* Get the inner value as Python object */
+                    PyObject *inner_py = crous_to_pyobj_with_hook(inner, object_hook);
+                    if (!inner_py) { Py_DECREF(decoder); return NULL; }
+                    
+                    /* Call the decoder */
+                    PyObject *result = PyObject_CallFunctionObjArgs(decoder, inner_py, NULL);
+                    Py_DECREF(inner_py);
+                    Py_DECREF(decoder);
+                    return result;
+                }
+            }
+            
+            /* No decoder found, return inner value */
+            return crous_to_pyobj_with_hook(inner, object_hook);
+        }
         
-        default: {
-            PyErr_Format(CrousDecodeError, "Unknown type byte: 0x%02x", type);
-            *success = 0;
+        default:
+            PyErr_SetString(CrousError, "Unknown crous value type");
             return NULL;
-        }
     }
 }
 
-// documentation nation
-
-PyDoc_STRVAR(crous_dumps_doc,
-"dumps(obj, *, default=None, allow_custom=True) -> bytes\n\n"
-"Serialize obj to Crous binary format.\n\n"
-"Args:\n"
-"    obj: Python object to serialize.\n"
-"    default: Callable for non-serializable objects (unused, for compatibility).\n"
-"    allow_custom: Whether to allow custom types (default True).\n\n"
-"Returns:\n"
-"    bytes: Crous-encoded binary data.\n\n"
-"Raises:\n"
-"    CrousEncodeError: If object cannot be serialized.\n\n"
-"Example:\n"
-"    >>> crous.dumps({'key': 'value', 'num': 42})\n"
-"    b'CR...'\n"
-);
-
-PyDoc_STRVAR(crous_loads_doc,
-"loads(data, *, object_hook=None, decoder=None) -> object\n\n"
-"Deserialize Crous binary data to Python object.\n\n"
-"Args:\n"
-"    data: Bytes-like object with Crous-encoded data.\n"
-"    object_hook: Callable for dict post-processing (unused, for compatibility).\n"
-"    decoder: Decoder instance (unused, for compatibility).\n\n"
-"Returns:\n"
-"    Deserialized Python object.\n\n"
-"Raises:\n"
-"    CrousDecodeError: If data is malformed or truncated.\n\n"
-"Example:\n"
-"    >>> crous.loads(b'CR...')\n"
-"    {'key': 'value', 'num': 42}\n"
-);
-
-PyDoc_STRVAR(crous_dump_doc,
-"dump(obj, fp, *, default=None) -> None\n\n"
-"Serialize obj to a file-like object.\n\n"
-"Args:\n"
-"    obj: Python object to serialize.\n"
-"    fp: File path (str) or file-like object with write() method.\n"
-"    default: Callable for non-serializable objects.\n\n"
-"Returns:\n"
-"    None\n\n"
-"Raises:\n"
-"    CrousEncodeError: If serialization fails.\n"
-"    IOError: If write fails.\n\n"
-"Example:\n"
-"    >>> with open('data.crous', 'wb') as f:\n"
-"    ...     crous.dump({'key': 'value'}, f)\n"
-);
-
-PyDoc_STRVAR(crous_load_doc,
-"load(fp, *, object_hook=None) -> object\n\n"
-"Deserialize from a file-like object.\n\n"
-"Args:\n"
-"    fp: File path (str) or file-like object with read() method.\n"
-"    object_hook: Callable for dict post-processing (unused, for compatibility).\n\n"
-"Returns:\n"
-"    Deserialized Python object.\n\n"
-"Raises:\n"
-"    CrousDecodeError: If data is malformed.\n"
-"    IOError: If read fails.\n\n"
-"Example:\n"
-"    >>> with open('data.crous', 'rb') as f:\n"
-"    ...     obj = crous.load(f)\n"
-);
-
-// encoder decoder fr fr
-
-static PyObject *
-CrousEncoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
-    return PyType_GenericNew(type, args, kwargs);
+/* Legacy function */
+static PyObject* crous_to_pyobj(const crous_value *v) {
+    return crous_to_pyobj_with_hook(v, NULL);
 }
+
+/* ============================================================================
+   CROUSENCODER CLASS
+   ============================================================================ */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *default_func;
+    int allow_custom;
+} CrousEncoderObject;
+
+static void CrousEncoder_dealloc(CrousEncoderObject *self) {
+    Py_XDECREF(self->default_func);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject* CrousEncoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+    CrousEncoderObject *self = (CrousEncoderObject *)type->tp_alloc(type, 0);
+    if (self) {
+        self->default_func = NULL;
+        self->allow_custom = 1;
+    }
+    return (PyObject *)self;
+}
+
+static int CrousEncoder_init(CrousEncoderObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"default", "allow_custom", NULL};
+    PyObject *default_func = NULL;
+    int allow_custom = 1;
+    
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|Op", kwlist, 
+                                      &default_func, &allow_custom)) {
+        return -1;
+    }
+    
+    Py_XINCREF(default_func);
+    Py_XDECREF(self->default_func);
+    self->default_func = default_func;
+    self->allow_custom = allow_custom;
+    
+    return 0;
+}
+
+static PyObject* CrousEncoder_encode(CrousEncoderObject *self, PyObject *args) {
+    PyObject *obj;
+    
+    if (!PyArg_ParseTuple(args, "O", &obj)) {
+        return NULL;
+    }
+    
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, self->default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        }
+        return NULL;
+    }
+    
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    err = crous_encode(value, &buf, &size);
+    crous_value_free_tree(value);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+    
+    PyObject *result = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
+}
+
+static PyMethodDef CrousEncoder_methods[] = {
+    {"encode", (PyCFunction)CrousEncoder_encode, METH_VARARGS, 
+     "Encode a Python object to Crous binary format."},
+    {NULL, NULL, 0, NULL}
+};
 
 static PyTypeObject CrousEncoderType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "crous.CrousEncoder",
-    .tp_doc = PyDoc_STR("Encoder class (stub for API compatibility)."),
-    .tp_basicsize = 0,
+    .tp_doc = "Crous encoder class for serializing Python objects to binary format.",
+    .tp_basicsize = sizeof(CrousEncoderObject),
     .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     .tp_new = CrousEncoder_new,
+    .tp_init = (initproc)CrousEncoder_init,
+    .tp_dealloc = (destructor)CrousEncoder_dealloc,
+    .tp_methods = CrousEncoder_methods,
 };
 
-static PyObject *
-CrousDecoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
-    return PyType_GenericNew(type, args, kwargs);
+/* ============================================================================
+   CROUSDECODER CLASS
+   ============================================================================ */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *object_hook;
+} CrousDecoderObject;
+
+static void CrousDecoder_dealloc(CrousDecoderObject *self) {
+    Py_XDECREF(self->object_hook);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
+
+static PyObject* CrousDecoder_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+    CrousDecoderObject *self = (CrousDecoderObject *)type->tp_alloc(type, 0);
+    if (self) {
+        self->object_hook = NULL;
+    }
+    return (PyObject *)self;
+}
+
+static int CrousDecoder_init(CrousDecoderObject *self, PyObject *args, PyObject *kwargs) {
+    static char *kwlist[] = {"object_hook", NULL};
+    PyObject *object_hook = NULL;
+    
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist, &object_hook)) {
+        return -1;
+    }
+    
+    Py_XINCREF(object_hook);
+    Py_XDECREF(self->object_hook);
+    self->object_hook = object_hook;
+    
+    return 0;
+}
+
+static PyObject* CrousDecoder_decode(CrousDecoderObject *self, PyObject *args) {
+    const uint8_t *buf;
+    Py_ssize_t buf_size;
+    
+    if (!PyArg_ParseTuple(args, "y#", &buf, &buf_size)) {
+        return NULL;
+    }
+    
+    crous_value *value = NULL;
+    crous_err_t err = crous_decode(buf, (size_t)buf_size, &value);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
+        return NULL;
+    }
+    
+    PyObject *result = crous_to_pyobj_with_hook(value, self->object_hook);
+    crous_value_free_tree(value);
+    return result;
+}
+
+static PyMethodDef CrousDecoder_methods[] = {
+    {"decode", (PyCFunction)CrousDecoder_decode, METH_VARARGS,
+     "Decode Crous binary data to a Python object."},
+    {NULL, NULL, 0, NULL}
+};
 
 static PyTypeObject CrousDecoderType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "crous.CrousDecoder",
-    .tp_doc = PyDoc_STR("Decoder class (stub for API compatibility)."),
-    .tp_basicsize = 0,
+    .tp_doc = "Crous decoder class for deserializing binary data to Python objects.",
+    .tp_basicsize = sizeof(CrousDecoderObject),
     .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     .tp_new = CrousDecoder_new,
+    .tp_init = (initproc)CrousDecoder_init,
+    .tp_dealloc = (destructor)CrousDecoder_dealloc,
+    .tp_methods = CrousDecoder_methods,
 };
 
-// core functions go hard
+/* ============================================================================
+   PYTHON MODULE FUNCTIONS
+   ============================================================================ */
 
-static PyObject *pycrous_dumps(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs) {
+static PyObject* py_dumps(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *obj;
-    PyObject *default_fn = NULL;
+    PyObject *default_func = NULL;
+    PyObject *encoder = NULL;
     int allow_custom = 1;
+    static char *kwlist[] = {"obj", "default", "encoder", "allow_custom", NULL};
     
-    static char *kwlist[] = {"obj", "default", "allow_custom", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Oi", kwlist, 
-                                     &obj, &default_fn, &allow_custom)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|OOp", kwlist, 
+                                      &obj, &default_func, &encoder, &allow_custom)) {
         return NULL;
     }
     
-    Buffer *buf = buffer_create(256);
-    if (!buf) {
-        PyErr_NoMemory();
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        }
         return NULL;
     }
     
-    // add the magic number
-    if (!buffer_write_u8(buf, (CROUS_MAGIC >> 8) & 0xFF) ||
-        !buffer_write_u8(buf, CROUS_MAGIC & 0xFF) ||
-        !buffer_write_u8(buf, CROUS_VERSION)) {
-        buffer_free(buf);
-        PyErr_NoMemory();
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    err = crous_encode(value, &buf, &size);
+    crous_value_free_tree(value);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        free(buf);
         return NULL;
     }
     
-    // let's encode
-    if (!encode_object(buf, obj)) {
-        buffer_free(buf);
-        return NULL;
-    }
-    
-    // pack it up
-    PyObject *result = PyBytes_FromStringAndSize((const char *)buf->data, buf->pos);
-    buffer_free(buf);
-    
+    PyObject *result = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
     return result;
 }
 
-static PyObject *pycrous_loads(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs) {
-    Py_buffer view;
+static PyObject* py_loads(PyObject *self, PyObject *args, PyObject *kwargs) {
+    const uint8_t *buf;
+    Py_ssize_t buf_size;
     PyObject *object_hook = NULL;
     PyObject *decoder = NULL;
-    
     static char *kwlist[] = {"data", "object_hook", "decoder", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*|OO", kwlist,
-                                     &view, &object_hook, &decoder)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y#|OO", kwlist, 
+                                      &buf, &buf_size, &object_hook, &decoder)) {
         return NULL;
     }
     
-    Reader r;
-    r.data = (const uint8_t *)view.buf;
-    r.size = view.len;
-    r.pos = 0;
+    crous_value *value = NULL;
+    crous_err_t err = crous_decode(buf, (size_t)buf_size, &value);
     
-    if (r.size < 3) {
-        PyBuffer_Release(&view);
-        PyErr_SetString(CrousDecodeError, "Data too short");
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
         return NULL;
     }
     
-    uint16_t magic = (r.data[0] << 8) | r.data[1];
-    uint8_t version = r.data[2];
-    r.pos = 3;
-    
-    // magic check
-    if (magic != CROUS_MAGIC) {
-        PyBuffer_Release(&view);
-        PyErr_SetString(CrousDecodeError, "Invalid magic number");
-        return NULL;
-    }
-    
-    if (version != CROUS_VERSION) {
-        PyBuffer_Release(&view);
-        PyErr_Format(CrousDecodeError, "Unsupported version: %d", version);
-        return NULL;
-    }
-    
-    // do the thing
-    int success = 1;
-    PyObject *result = decode_object(&r, &success);
-    
-    PyBuffer_Release(&view);
-    
-    if (!success) {
-        return NULL;
-    }
-    
+    PyObject *result = crous_to_pyobj_with_hook(value, object_hook);
+    crous_value_free_tree(value);
     return result;
 }
 
-// file io hits different
-
-static PyObject *pycrous_dump(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs) {
-    PyObject *obj, *fp;
-    PyObject *default_fn = NULL;
-    
+static PyObject* py_dump(PyObject *self, PyObject *args, PyObject *kwargs) {
+    PyObject *obj;
+    PyObject *fp;
+    PyObject *default_func = NULL;
     static char *kwlist[] = {"obj", "fp", "default", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O", kwlist,
-                                     &obj, &fp, &default_fn)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O", kwlist, 
+                                      &obj, &fp, &default_func)) {
         return NULL;
     }
     
-    // serialize first
-    PyObject *dumps_args = Py_BuildValue("(O)", obj);
-    if (!dumps_args) return NULL;
-    
-    PyObject *dumps_result = pycrous_dumps(NULL, dumps_args, kwargs);
-    Py_DECREF(dumps_args);
-    
-    if (!dumps_result) return NULL;
-    
-    /* Check if fp is a string (file path) */
-    if (PyUnicode_Check(fp)) {
-        const char *path = PyUnicode_AsUTF8(fp);
-        if (!path) {
-            Py_DECREF(dumps_result);
-            return NULL;
+    /* Convert Python object to crous value */
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
         }
-        
-        FILE *f = fopen(path, "wb");
-        if (!f) {
-            Py_DECREF(dumps_result);
-            PyErr_Format(PyExc_IOError, "Cannot open file: %s", path);
-            return NULL;
-        }
-        
-        size_t data_len = PyBytes_Size(dumps_result);
-        uint8_t *data = (uint8_t *)PyBytes_AsString(dumps_result);
-        
-        size_t written = fwrite(data, 1, data_len, f);
-        int close_status = fclose(f);
-        
-        Py_DECREF(dumps_result);
-        
-        if (written != data_len || close_status != 0) {
-            PyErr_Format(PyExc_IOError, "Failed to write to file: %s", path);
-            return NULL;
-        }
-        
-        Py_RETURN_NONE;
-    }
-    
-    // file object mode
-    PyObject *write_method = PyObject_GetAttrString(fp, "write");
-    if (!write_method) {
-        Py_DECREF(dumps_result);
-        PyErr_SetString(PyExc_AttributeError, "fp has no write() method");
         return NULL;
     }
     
-    PyObject *write_result = PyObject_CallFunctionObjArgs(write_method, 
-                                                           dumps_result, NULL);
-    Py_DECREF(write_method);
-    Py_DECREF(dumps_result);
+    /* Encode to binary */
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    err = crous_encode(value, &buf, &size);
+    crous_value_free_tree(value);
     
-    if (!write_result) return NULL;
-    Py_DECREF(write_result);
-    
-    Py_RETURN_NONE;
-}
-
-static PyObject *pycrous_load(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs) {
-    PyObject *fp;
-    PyObject *object_hook = NULL;
-    
-    static char *kwlist[] = {"fp", "object_hook", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist,
-                                     &fp, &object_hook)) {
-        return NULL;
-    }
-    
-    PyObject *data = NULL;
-    // is it a path or file object?
-    if (PyUnicode_Check(fp)) {
-        const char *path = PyUnicode_AsUTF8(fp);
-        if (!path) return NULL;
-        
-        FILE *f = fopen(path, "rb");
-        if (!f) {
-            PyErr_Format(PyExc_IOError, "Cannot open file: %s", path);
-            return NULL;
-        }
-        
-        fseek(f, 0, SEEK_END);
-        long file_size = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        
-        if (file_size < 0) {
-            fclose(f);
-            PyErr_Format(PyExc_IOError, "Cannot determine file size: %s", path);
-            return NULL;
-        }
-        
-        uint8_t *buf = (uint8_t *)malloc(file_size);
-        if (!buf) {
-            fclose(f);
-            PyErr_NoMemory();
-            return NULL;
-        }
-        
-        size_t read_bytes = fread(buf, 1, file_size, f);
-        fclose(f);
-        
-        if (read_bytes != (size_t)file_size) {
-            free(buf);
-            PyErr_Format(PyExc_IOError, "Failed to read file: %s", path);
-            return NULL;
-        }
-        
-        data = PyBytes_FromStringAndSize((const char *)buf, file_size);
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
         free(buf);
-        
-        if (!data) return NULL;
-    } else {
-        // file object era
-        PyObject *read_method = PyObject_GetAttrString(fp, "read");
-        if (!read_method) {
-            PyErr_SetString(PyExc_AttributeError, "fp has no read() method");
-            return NULL;
-        }
-        
-        data = PyObject_CallObject(read_method, NULL);
-        Py_DECREF(read_method);
-        
-        if (!data) return NULL;
-    }
-    
-    // time to decode
-    PyObject *loads_args = Py_BuildValue("(O)", data);
-    Py_DECREF(data);
-    if (!loads_args) return NULL;
-    
-    PyObject *loads_result = pycrous_loads(NULL, loads_args, kwargs);
-    Py_DECREF(loads_args);
-    
-    return loads_result;
-}
-
-// streaming > blocking no cap
-
-PyDoc_STRVAR(crous_dumps_stream_doc,
-"dumps_stream(obj, fp, *, default=None) -> None\n\n"
-"Stream-based serialization (currently identical to dump).\n\n"
-"Args:\n"
-"    obj: Python object to serialize.\n"
-"    fp: File-like object with write() method (opened in 'wb' mode).\n"
-"    default: Callable for non-serializable objects.\n\n"
-"Returns:\n"
-"    None\n\n"
-"Raises:\n"
-"    CrousEncodeError: If serialization fails.\n"
-"    IOError: If write fails.\n\n"
-"Example:\n"
-"    >>> with open('data.crous', 'wb') as f:\n"
-"    ...     crous.dumps_stream({'key': 'value'}, f)\n"
-);
-
-static PyObject *pycrous_dumps_stream(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs) {
-    PyObject *obj, *fp;
-    PyObject *default_fn = NULL;
-    
-    static char *kwlist[] = {"obj", "fp", "default", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O", kwlist,
-                                     &obj, &fp, &default_fn)) {
         return NULL;
     }
     
-    // make the bytes
-    PyObject *dumps_args = Py_BuildValue("(O)", obj);
-    if (!dumps_args) return NULL;
-    
-    PyObject *dumps_kwargs = PyDict_New();
-    if (!dumps_kwargs) {
-        Py_DECREF(dumps_args);
-        return NULL;
-    }
-    
-    if (default_fn) {
-        PyDict_SetItemString(dumps_kwargs, "default", default_fn);
-    }
-    
-    PyObject *dumps_result = pycrous_dumps(NULL, dumps_args, dumps_kwargs);
-    Py_DECREF(dumps_args);
-    Py_DECREF(dumps_kwargs);
-    
-    if (!dumps_result) return NULL;
-    
-    // pump it out
+    /* Write to file object */
     PyObject *write_method = PyObject_GetAttrString(fp, "write");
     if (!write_method) {
-        Py_DECREF(dumps_result);
-        PyErr_SetString(PyExc_AttributeError, "fp has no write() method");
+        PyErr_SetString(PyExc_TypeError, "fp must have a write() method");
+        free(buf);
         return NULL;
     }
     
-    PyObject *write_result = PyObject_CallFunctionObjArgs(write_method, 
-                                                           dumps_result, NULL);
+    PyObject *bytes_obj = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
+    if (!bytes_obj) {
+        Py_DECREF(write_method);
+        return NULL;
+    }
+    
+    PyObject *result = PyObject_CallFunctionObjArgs(write_method, bytes_obj, NULL);
+    Py_DECREF(bytes_obj);
     Py_DECREF(write_method);
-    Py_DECREF(dumps_result);
     
-    if (!write_result) return NULL;
-    Py_DECREF(write_result);
+    if (!result) {
+        return NULL;
+    }
     
+    Py_DECREF(result);
     Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(crous_loads_stream_doc,
-"loads_stream(fp, *, object_hook=None) -> object\n\n"
-"Stream-based deserialization (currently identical to load).\n\n"
-"Args:\n"
-"    fp: File-like object with read() method (opened in 'rb' mode).\n"
-"    object_hook: Callable for dict post-processing (unused, for compatibility).\n\n"
-"Returns:\n"
-"    Deserialized Python object.\n\n"
-"Raises:\n"
-"    CrousDecodeError: If data is malformed or truncated.\n"
-"    IOError: If read fails.\n\n"
-"Example:\n"
-"    >>> with open('data.crous', 'rb') as f:\n"
-"    ...     obj = crous.loads_stream(f)\n"
-);
-
-static PyObject *pycrous_loads_stream(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs) {
+static PyObject* py_load(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *fp;
     PyObject *object_hook = NULL;
-    
     static char *kwlist[] = {"fp", "object_hook", NULL};
     
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist,
-                                     &fp, &object_hook)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, 
+                                      &fp, &object_hook)) {
         return NULL;
     }
     
-    // slurp it all
+    /* Read from file object */
     PyObject *read_method = PyObject_GetAttrString(fp, "read");
     if (!read_method) {
-        PyErr_SetString(PyExc_AttributeError, "fp has no read() method");
+        PyErr_SetString(PyExc_TypeError, "fp must have a read() method");
         return NULL;
     }
     
-    PyObject *data = PyObject_CallObject(read_method, NULL);
+    PyObject *bytes_obj = PyObject_CallFunction(read_method, NULL);
     Py_DECREF(read_method);
     
-    if (!data) return NULL;
-    
-    // decode time
-    PyObject *loads_args = PyTuple_Pack(1, data);
-    if (!loads_args) {
-        Py_DECREF(data);
+    if (!bytes_obj) {
         return NULL;
     }
     
-    PyObject *loads_kwargs = PyDict_New();
-    if (!loads_kwargs) {
-        Py_DECREF(loads_args);
-        Py_DECREF(data);
+    if (!PyBytes_Check(bytes_obj)) {
+        PyErr_SetString(PyExc_TypeError, "read() must return bytes");
+        Py_DECREF(bytes_obj);
         return NULL;
     }
     
-    if (object_hook) {
-        PyDict_SetItemString(loads_kwargs, "object_hook", object_hook);
+    const uint8_t *buf = (uint8_t *)PyBytes_AsString(bytes_obj);
+    Py_ssize_t buf_size = PyBytes_Size(bytes_obj);
+    
+    /* Decode from binary */
+    crous_value *value = NULL;
+    crous_err_t err = crous_decode(buf, (size_t)buf_size, &value);
+    
+    Py_DECREF(bytes_obj);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
+        return NULL;
     }
     
-    PyObject *loads_result = pycrous_loads(NULL, loads_args, loads_kwargs);
-    Py_DECREF(loads_args);
-    Py_DECREF(loads_kwargs);
-    Py_DECREF(data);
-    
-    return loads_result;
+    /* Convert crous value to Python object */
+    PyObject *result = crous_to_pyobj_with_hook(value, object_hook);
+    crous_value_free_tree(value);
+    return result;
 }
 
-// registration logic slaps
-
-PyDoc_STRVAR(pycrous_register_serializer_doc,
-"register_serializer(typ, func) -> None\n\n"
-"Register a custom serializer for a type.\n\n"
-"Args:\n"
-"    typ: Type to register.\n"
-"    func: Callable(obj) -> serializable_value.\n"
-);
-
-static PyObject *pycrous_register_serializer(PyObject *Py_UNUSED(self), 
-                                            PyObject *args, PyObject *kwargs) {
-    PyObject *typ = NULL;
-    PyObject *func = NULL;
+static PyObject* py_dumps_stream(PyObject *self, PyObject *args, PyObject *kwargs) {
+    PyObject *obj;
+    PyObject *fp;
+    PyObject *default_func = NULL;
+    static char *kwlist[] = {"obj", "fp", "default", NULL};
     
-    static char *kwlist[] = {"typ", "func", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO", kwlist, &typ, &func)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O", kwlist, 
+                                      &obj, &fp, &default_func)) {
         return NULL;
     }
     
-    /* Ensure func is callable */
-    if (!PyCallable_Check(func)) {
-        PyErr_SetString(PyExc_TypeError, "func must be callable");
-        return NULL;
-    }
+    /* Use already-parsed arguments directly instead of re-forwarding
+       args/kwargs to py_dump, which would double-parse and could
+       silently corrupt keyword argument binding. */
     
-    // create registry if needed
-    if (_serializer_registry == NULL) {
-        _serializer_registry = PyDict_New();
-        if (_serializer_registry == NULL) {
-            return NULL;
+    /* Convert Python object to crous value */
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
         }
-    }
-    
-    // add to registry
-    if (PyDict_SetItem(_serializer_registry, typ, func) < 0) {
         return NULL;
     }
     
+    /* Encode to binary */
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    err = crous_encode(value, &buf, &size);
+    crous_value_free_tree(value);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+    
+    /* Write to file object */
+    PyObject *write_method = PyObject_GetAttrString(fp, "write");
+    if (!write_method) {
+        PyErr_SetString(PyExc_TypeError, "fp must have a write() method");
+        free(buf);
+        return NULL;
+    }
+    
+    PyObject *bytes_obj = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
+    if (!bytes_obj) {
+        Py_DECREF(write_method);
+        return NULL;
+    }
+    
+    PyObject *result = PyObject_CallFunctionObjArgs(write_method, bytes_obj, NULL);
+    Py_DECREF(bytes_obj);
+    Py_DECREF(write_method);
+    
+    if (!result) {
+        return NULL;
+    }
+    
+    Py_DECREF(result);
     Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(pycrous_unregister_serializer_doc,
-"unregister_serializer(typ) -> None\n\n"
-"Unregister a custom serializer.\n\n"
-"Args:\n"
-"    typ: Type to unregister.\n"
-);
-
-static PyObject *pycrous_unregister_serializer(PyObject *Py_UNUSED(self), 
-                                              PyObject *args, PyObject *kwargs) {
-    PyObject *typ = NULL;
+static PyObject* py_loads_stream(PyObject *self, PyObject *args, PyObject *kwargs) {
+    PyObject *fp;
+    PyObject *object_hook = NULL;
+    static char *kwlist[] = {"fp", "object_hook", NULL};
     
-    static char *kwlist[] = {"typ", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", kwlist, &typ)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", kwlist, 
+                                      &fp, &object_hook)) {
         return NULL;
     }
     
-    // nothing to remove?
-    if (_serializer_registry == NULL) {
-        Py_RETURN_NONE;
+    /* Use already-parsed arguments directly instead of re-forwarding
+       args/kwargs to py_load. */
+    
+    /* Read from file object */
+    PyObject *read_method = PyObject_GetAttrString(fp, "read");
+    if (!read_method) {
+        PyErr_SetString(PyExc_TypeError, "fp must have a read() method");
+        return NULL;
     }
     
-    // yeet it
-    if (PyDict_DelItem(_serializer_registry, typ) < 0) {
+    PyObject *bytes_obj = PyObject_CallFunction(read_method, NULL);
+    Py_DECREF(read_method);
+    
+    if (!bytes_obj) {
+        return NULL;
+    }
+    
+    if (!PyBytes_Check(bytes_obj)) {
+        PyErr_SetString(PyExc_TypeError, "read() must return bytes");
+        Py_DECREF(bytes_obj);
+        return NULL;
+    }
+    
+    const uint8_t *buf = (uint8_t *)PyBytes_AsString(bytes_obj);
+    Py_ssize_t buf_size = PyBytes_Size(bytes_obj);
+    
+    /* Decode from binary */
+    crous_value *value = NULL;
+    crous_err_t err = crous_decode(buf, (size_t)buf_size, &value);
+    
+    Py_DECREF(bytes_obj);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
+        return NULL;
+    }
+    
+    /* Convert crous value to Python object */
+    PyObject *result = crous_to_pyobj_with_hook(value, object_hook);
+    crous_value_free_tree(value);
+    return result;
+}
+
+/* ============================================================================
+   CUSTOM SERIALIZER/DECODER REGISTRATION
+   ============================================================================ */
+
+static PyObject* py_register_serializer(PyObject *self, PyObject *args) {
+    PyObject *type_obj;
+    PyObject *func;
+    
+    if (!PyArg_ParseTuple(args, "OO", &type_obj, &func)) {
+        return NULL;
+    }
+    
+    if (!PyType_Check(type_obj)) {
+        PyErr_SetString(PyExc_TypeError, "First argument must be a type");
+        return NULL;
+    }
+    
+    if (!PyCallable_Check(func)) {
+        PyErr_SetString(PyExc_TypeError, "Second argument must be callable");
+        return NULL;
+    }
+    
+    registry_lock_acquire();
+    
+    /* Initialize registries if needed */
+    if (!custom_serializers) {
+        custom_serializers = PyDict_New();
+        if (!custom_serializers) { registry_lock_release(); return NULL; }
+    }
+    if (!type_to_tag) {
+        type_to_tag = PyDict_New();
+        if (!type_to_tag) { registry_lock_release(); return NULL; }
+    }
+    
+    /* Add to registry */
+    if (PyDict_SetItem(custom_serializers, type_obj, func) < 0) {
+        registry_lock_release();
+        return NULL;
+    }
+    
+    /* Assign a tag to this type */
+    PyObject *tag_obj = PyLong_FromUnsignedLong(next_custom_tag++);
+    if (!tag_obj) { registry_lock_release(); return NULL; }
+    
+    if (PyDict_SetItem(type_to_tag, type_obj, tag_obj) < 0) {
+        Py_DECREF(tag_obj);
+        registry_lock_release();
+        return NULL;
+    }
+    Py_DECREF(tag_obj);
+    
+    registry_lock_release();
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_unregister_serializer(PyObject *self, PyObject *args) {
+    PyObject *type_obj;
+    
+    if (!PyArg_ParseTuple(args, "O", &type_obj)) {
+        return NULL;
+    }
+    
+    if (!PyType_Check(type_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Argument must be a type");
+        return NULL;
+    }
+    
+    registry_lock_acquire();
+    
+    if (custom_serializers) {
+        PyDict_DelItem(custom_serializers, type_obj);
+        PyErr_Clear();  /* Ignore if key not found */
+    }
+    
+    if (type_to_tag) {
+        PyDict_DelItem(type_to_tag, type_obj);
         PyErr_Clear();
     }
     
+    registry_lock_release();
     Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(pycrous_register_decoder_doc,
-"register_decoder(tag, func) -> None\n\n"
-"Register a custom decoder for a tag.\n\n"
-"Args:\n"
-"    tag: Tag identifier (int).\n"
-"    func: Callable(value) -> deserialized_object.\n"
-);
-
-static PyObject *pycrous_register_decoder(PyObject *Py_UNUSED(self), 
-                                         PyObject *args, PyObject *kwargs) {
-    long tag = 0;
-    PyObject *func = NULL;
-    PyObject *tag_obj = NULL;
+static PyObject* py_register_decoder(PyObject *self, PyObject *args) {
+    unsigned int tag;
+    PyObject *func;
     
-    static char *kwlist[] = {"tag", "func", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "iO", kwlist, &tag, &func)) {
+    if (!PyArg_ParseTuple(args, "IO", &tag, &func)) {
         return NULL;
     }
     
-    /* Ensure func is callable */
     if (!PyCallable_Check(func)) {
-        PyErr_SetString(PyExc_TypeError, "func must be callable");
+        PyErr_SetString(PyExc_TypeError, "Second argument must be callable");
         return NULL;
     }
     
-    // spawn the registry
-    if (_decoder_registry == NULL) {
-        _decoder_registry = PyDict_New();
-        if (_decoder_registry == NULL) {
-            return NULL;
+    registry_lock_acquire();
+    
+    /* Initialize registry if needed */
+    if (!custom_decoders) {
+        custom_decoders = PyDict_New();
+        if (!custom_decoders) { registry_lock_release(); return NULL; }
+    }
+    
+    /* Add to registry */
+    PyObject *tag_key = PyLong_FromUnsignedLong(tag);
+    if (!tag_key) { registry_lock_release(); return NULL; }
+    
+    if (PyDict_SetItem(custom_decoders, tag_key, func) < 0) {
+        Py_DECREF(tag_key);
+        registry_lock_release();
+        return NULL;
+    }
+    
+    Py_DECREF(tag_key);
+    registry_lock_release();
+    Py_RETURN_NONE;
+}
+
+static PyObject* py_unregister_decoder(PyObject *self, PyObject *args) {
+    unsigned int tag;
+    
+    if (!PyArg_ParseTuple(args, "I", &tag)) {
+        return NULL;
+    }
+    
+    registry_lock_acquire();
+    
+    if (custom_decoders) {
+        PyObject *tag_key = PyLong_FromUnsignedLong(tag);
+        if (tag_key) {
+            PyDict_DelItem(custom_decoders, tag_key);
+            Py_DECREF(tag_key);
+            PyErr_Clear();  /* Ignore if key not found */
         }
     }
     
-    /* Convert tag to Python int object */
-    tag_obj = PyLong_FromLong(tag);
-    if (tag_obj == NULL) {
-        return NULL;
-    }
-    
-    // register it
-    int result = PyDict_SetItem(_decoder_registry, tag_obj, func);
-    Py_DECREF(tag_obj);
-    
-    if (result < 0) {
-        return NULL;
-    }
-    
+    registry_lock_release();
     Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(pycrous_unregister_decoder_doc,
-"unregister_decoder(tag) -> None\n\n"
-"Unregister a custom decoder.\n\n"
-"Args:\n"
-"    tag: Tag identifier (int).\n"
-);
+/* ============================================================================
+   CROUT TEXT FORMAT FUNCTIONS
+   ============================================================================ */
 
-static PyObject *pycrous_unregister_decoder(PyObject *Py_UNUSED(self), 
-                                           PyObject *args, PyObject *kwargs) {
-    long tag = 0;
-    PyObject *tag_obj = NULL;
-    
-    static char *kwlist[] = {"tag", NULL};
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "i", kwlist, &tag)) {
+static PyObject* py_dumps_text(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    PyObject *obj;
+    PyObject *default_func = NULL;
+    int use_tokens = 1;
+    int pretty = 0;
+    int indent = 2;
+    static char *kwlist[] = {"obj", "default", "use_tokens", "pretty", "indent", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Oppi", kwlist,
+                                      &obj, &default_func, &use_tokens, &pretty, &indent))
+        return NULL;
+
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred())
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
         return NULL;
     }
-    
-    // already gone?
-    if (_decoder_registry == NULL) {
-        Py_RETURN_NONE;
-    }
-    
-    // convert tag
-    tag_obj = PyLong_FromLong(tag);
-    if (tag_obj == NULL) {
+
+    crout_options_t opts = crout_options_default();
+    opts.use_tokens = use_tokens;
+    opts.pretty = pretty;
+    opts.indent = indent;
+
+    char *buf = NULL;
+    size_t size = 0;
+    err = crout_encode(value, &opts, &buf, &size);
+    crous_value_free_tree(value);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        free(buf);
         return NULL;
     }
-    // remove it
-    if (PyDict_DelItem(_decoder_registry, tag_obj) < 0) {
-        PyErr_Clear();
-    }
-    
-    Py_DECREF(tag_obj);
-    Py_RETURN_NONE;
+
+    PyObject *result = PyUnicode_FromStringAndSize(buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
 }
 
-// all the methods
+static PyObject* py_loads_text(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    const char *buf;
+    Py_ssize_t buf_size;
+    PyObject *object_hook = NULL;
+    static char *kwlist[] = {"data", "object_hook", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s#|O", kwlist,
+                                      &buf, &buf_size, &object_hook))
+        return NULL;
+
+    crous_value *value = NULL;
+    crous_err_t err = crout_decode(buf, (size_t)buf_size, &value);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
+        return NULL;
+    }
+
+    PyObject *result = crous_to_pyobj_with_hook(value, object_hook);
+    crous_value_free_tree(value);
+    return result;
+}
+
+static PyObject* py_text_to_flux(PyObject *self, PyObject *args) {
+    (void)self;
+    const char *text;
+    Py_ssize_t text_len;
+
+    if (!PyArg_ParseTuple(args, "s#", &text, &text_len))
+        return NULL;
+
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    crous_err_t err = crout_text_to_flux(text, (size_t)text_len, &buf, &size);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+
+    PyObject *result = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
+}
+
+static PyObject* py_flux_to_text(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    const uint8_t *flux;
+    Py_ssize_t flux_len;
+    int use_tokens = 1;
+    int pretty = 0;
+    static char *kwlist[] = {"data", "use_tokens", "pretty", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y#|pp", kwlist,
+                                      &flux, &flux_len, &use_tokens, &pretty))
+        return NULL;
+
+    crout_options_t opts = crout_options_default();
+    opts.use_tokens = use_tokens;
+    opts.pretty = pretty;
+
+    char *buf = NULL;
+    size_t size = 0;
+    crous_err_t err = crout_flux_to_text(flux, (size_t)flux_len, &opts, &buf, &size);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+
+    PyObject *result = PyUnicode_FromStringAndSize(buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
+}
+
+/* ============================================================================
+   MODULE SETUP
+   ============================================================================ */
 
 static PyMethodDef crous_methods[] = {
-    {"dumps", (PyCFunction)pycrous_dumps, METH_VARARGS | METH_KEYWORDS,
-     crous_dumps_doc},
-    {"loads", (PyCFunction)pycrous_loads, METH_VARARGS | METH_KEYWORDS,
-     crous_loads_doc},
-    {"dump", (PyCFunction)pycrous_dump, METH_VARARGS | METH_KEYWORDS,
-     crous_dump_doc},
-    {"load", (PyCFunction)pycrous_load, METH_VARARGS | METH_KEYWORDS,
-     crous_load_doc},
-    {"dumps_stream", (PyCFunction)pycrous_dumps_stream, METH_VARARGS | METH_KEYWORDS,
-     crous_dumps_stream_doc},
-    {"loads_stream", (PyCFunction)pycrous_loads_stream, METH_VARARGS | METH_KEYWORDS,
-     crous_loads_stream_doc},
-    {"register_serializer", (PyCFunction)pycrous_register_serializer, 
-     METH_VARARGS | METH_KEYWORDS, pycrous_register_serializer_doc},
-    {"unregister_serializer", (PyCFunction)pycrous_unregister_serializer, 
-     METH_VARARGS | METH_KEYWORDS, pycrous_unregister_serializer_doc},
-    {"register_decoder", (PyCFunction)pycrous_register_decoder, 
-     METH_VARARGS | METH_KEYWORDS, pycrous_register_decoder_doc},
-    {"unregister_decoder", (PyCFunction)pycrous_unregister_decoder, 
-     METH_VARARGS | METH_KEYWORDS, pycrous_unregister_decoder_doc},
+    {"dumps", (PyCFunction)(void(*)(void))py_dumps, METH_VARARGS | METH_KEYWORDS, 
+     "Encode Python object to CROUS binary format.\n\n"
+     "Args:\n"
+     "    obj: Python object to serialize\n"
+     "    default: Optional callable for custom types\n"
+     "    encoder: Optional encoder instance (reserved)\n"
+     "    allow_custom: Whether to allow custom types (default True)\n\n"
+     "Returns:\n"
+     "    bytes: Binary encoded data"},
+    {"loads", (PyCFunction)(void(*)(void))py_loads, METH_VARARGS | METH_KEYWORDS, 
+     "Decode CROUS binary format to Python object.\n\n"
+     "Args:\n"
+     "    data: Bytes to decode\n"
+     "    object_hook: Optional callable for dict post-processing\n"
+     "    decoder: Optional decoder instance (reserved)\n\n"
+     "Returns:\n"
+     "    Deserialized Python object"},
+    {"dump", (PyCFunction)(void(*)(void))py_dump, METH_VARARGS | METH_KEYWORDS, 
+     "Serialize object to file.\n\n"
+     "Args:\n"
+     "    obj: Python object to serialize\n"
+     "    fp: File-like object with write() method\n"
+     "    default: Optional callable for custom types"},
+    {"load", (PyCFunction)(void(*)(void))py_load, METH_VARARGS | METH_KEYWORDS, 
+     "Deserialize object from file.\n\n"
+     "Args:\n"
+     "    fp: File-like object with read() method\n"
+     "    object_hook: Optional callable for dict post-processing"},
+    {"dumps_stream", (PyCFunction)(void(*)(void))py_dumps_stream, METH_VARARGS | METH_KEYWORDS, 
+     "Serialize object to stream (same as dump for file objects)."},
+    {"loads_stream", (PyCFunction)(void(*)(void))py_loads_stream, METH_VARARGS | METH_KEYWORDS, 
+     "Deserialize object from stream (same as load for file objects)."},
+    {"register_serializer", py_register_serializer, METH_VARARGS, 
+     "Register a custom serializer for a Python type.\n\n"
+     "Args:\n"
+     "    typ: The Python type to register\n"
+     "    func: Callable(obj) -> serializable value\n\n"
+     "Example:\n"
+     "    def serialize_datetime(dt):\n"
+     "        return dt.isoformat()\n"
+     "    crous.register_serializer(datetime, serialize_datetime)"},
+    {"unregister_serializer", py_unregister_serializer, METH_VARARGS, 
+     "Unregister a custom serializer.\n\n"
+     "Args:\n"
+     "    typ: The type to unregister"},
+    {"register_decoder", py_register_decoder, METH_VARARGS, 
+     "Register a custom decoder for a tagged value.\n\n"
+     "Args:\n"
+     "    tag: Tag identifier (int)\n"
+     "    func: Callable(value) -> decoded object\n\n"
+     "Example:\n"
+     "    def decode_datetime(value):\n"
+     "        return datetime.fromisoformat(value)\n"
+     "    crous.register_decoder(100, decode_datetime)"},
+    {"unregister_decoder", py_unregister_decoder, METH_VARARGS, 
+     "Unregister a custom decoder.\n\n"
+     "Args:\n"
+     "    tag: Tag identifier to unregister"},
+    {"dumps_text", (PyCFunction)(void(*)(void))py_dumps_text, METH_VARARGS | METH_KEYWORDS,
+     "Encode Python object to CROUT text format.\n\n"
+     "Args:\n"
+     "    obj: Python object to serialize\n"
+     "    default: Optional callable for custom types\n"
+     "    use_tokens: Build token table for repeated keys (default True)\n"
+     "    pretty: Pretty-print with indentation (default False)\n"
+     "    indent: Spaces per indent level (default 2)\n\n"
+     "Returns:\n"
+     "    str: CROUT-encoded text"},
+    {"loads_text", (PyCFunction)(void(*)(void))py_loads_text, METH_VARARGS | METH_KEYWORDS,
+     "Decode CROUT text format to Python object.\n\n"
+     "Args:\n"
+     "    data: CROUT text string to decode\n"
+     "    object_hook: Optional callable for dict post-processing\n\n"
+     "Returns:\n"
+     "    Deserialized Python object"},
+    {"text_to_flux", py_text_to_flux, METH_VARARGS,
+     "Convert CROUT text to FLUX binary.\n\n"
+     "Args:\n"
+     "    data: CROUT text string\n\n"
+     "Returns:\n"
+     "    bytes: FLUX binary data"},
+    {"flux_to_text", (PyCFunction)(void(*)(void))py_flux_to_text, METH_VARARGS | METH_KEYWORDS,
+     "Convert FLUX binary to CROUT text.\n\n"
+     "Args:\n"
+     "    data: FLUX binary bytes\n"
+     "    use_tokens: Build token table (default True)\n"
+     "    pretty: Pretty-print (default False)\n\n"
+     "Returns:\n"
+     "    str: CROUT text"},
     {NULL, NULL, 0, NULL}
 };
 
-// what is this tho
-
-PyDoc_STRVAR(crous_module_doc,
-"crous: High-performance binary serialization format for Python\n\n"
-"Core functions:\n"
-"    - dumps(obj) -> bytes: Serialize to binary.\n"
-"    - loads(data) -> obj: Deserialize from binary.\n"
-"    - dump(obj, fp): Serialize to file object or path.\n"
-"    - load(fp) -> obj: Deserialize from file object or path.\n\n"
-"Supported types:\n"
-"    None, bool, int, float, str, bytes, list, dict\n\n"
-"Classes:\n"
-"    - CrousEncoder: Encoder (stub for API compatibility).\n"
-"    - CrousDecoder: Decoder (stub for API compatibility).\n\n"
-"Exceptions:\n"
-"    - CrousError: Base exception.\n"
-"    - CrousEncodeError: Encoding errors.\n"
-"    - CrousDecodeError: Decoding errors.\n"
-);
-
-/*============================================================================
-  MODULE DEFINITION
-  ============================================================================*/
-
-/* Module cleanup function */
-static int crous_module_exec(PyObject *m) {
-    return 0;
-}
-
-static void crous_module_free(void *module_state) {
-    /* Clean up serializer registry */
-    if (_serializer_registry != NULL) {
-        Py_DECREF(_serializer_registry);
-        _serializer_registry = NULL;
-    }
-    
-    // decoder registry gone
-    if (_decoder_registry != NULL) {
-        Py_DECREF(_decoder_registry);
-        _decoder_registry = NULL;
-    }
-}
-
 static struct PyModuleDef crous_module = {
     PyModuleDef_HEAD_INIT,
-    .m_name = "crous",
-    .m_doc = crous_module_doc,
-    .m_size = -1,
-    .m_methods = crous_methods,
-    .m_free = crous_module_free,
+    "crous",
+    "CROUS - Compact Rapid Object Utility Serialization\n\n"
+    "A high-performance binary serialization format for Python.\n\n"
+    "Basic usage:\n"
+    "    import crous\n"
+    "    data = {'key': 'value', 'number': 42}\n"
+    "    binary = crous.dumps(data)\n"
+    "    result = crous.loads(binary)\n",
+    -1,
+    crous_methods
 };
-
-// let's go
 
 PyMODINIT_FUNC PyInit_crous(void) {
     PyObject *m = PyModule_Create(&crous_module);
-    if (m == NULL) return NULL;
+    if (!m) return NULL;
     
-    // exceptions fr
+    /* Initialize type objects */
+    if (PyType_Ready(&CrousEncoderType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    if (PyType_Ready(&CrousDecoderType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    
+    /* Create exception classes */
     CrousError = PyErr_NewException("crous.CrousError", NULL, NULL);
-    if (CrousError == NULL) goto fail;
+    if (!CrousError) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(CrousError);
+    if (PyModule_AddObject(m, "CrousError", CrousError) < 0) {
+        Py_DECREF(CrousError);
+        Py_DECREF(m);
+        return NULL;
+    }
     
-    CrousEncodeError = PyErr_NewException("crous.CrousEncodeError",
-                                          CrousError, NULL);
-    if (CrousEncodeError == NULL) goto fail;
+    CrousEncodeError = PyErr_NewException("crous.CrousEncodeError", CrousError, NULL);
+    if (!CrousEncodeError) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(CrousEncodeError);
+    if (PyModule_AddObject(m, "CrousEncodeError", CrousEncodeError) < 0) {
+        Py_DECREF(CrousEncodeError);
+        Py_DECREF(m);
+        return NULL;
+    }
     
-    CrousDecodeError = PyErr_NewException("crous.CrousDecodeError",
-                                          CrousError, NULL);
-    if (CrousDecodeError == NULL) goto fail;
+    CrousDecodeError = PyErr_NewException("crous.CrousDecodeError", CrousError, NULL);
+    if (!CrousDecodeError) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(CrousDecodeError);
+    if (PyModule_AddObject(m, "CrousDecodeError", CrousDecodeError) < 0) {
+        Py_DECREF(CrousDecodeError);
+        Py_DECREF(m);
+        return NULL;
+    }
     
-    // add em to module
-    if (PyModule_AddObject(m, "CrousError", CrousError) < 0) goto fail;
-    if (PyModule_AddObject(m, "CrousEncodeError", CrousEncodeError) < 0) goto fail;
-    if (PyModule_AddObject(m, "CrousDecodeError", CrousDecodeError) < 0) goto fail;
+    /* Add encoder/decoder classes */
+    Py_INCREF(&CrousEncoderType);
+    if (PyModule_AddObject(m, "CrousEncoder", (PyObject *)&CrousEncoderType) < 0) {
+        Py_DECREF(&CrousEncoderType);
+        Py_DECREF(m);
+        return NULL;
+    }
     
-    // types ready
-    if (PyType_Ready(&CrousEncoderType) < 0) goto fail;
-    if (PyType_Ready(&CrousDecoderType) < 0) goto fail;
+    Py_INCREF(&CrousDecoderType);
+    if (PyModule_AddObject(m, "CrousDecoder", (PyObject *)&CrousDecoderType) < 0) {
+        Py_DECREF(&CrousDecoderType);
+        Py_DECREF(m);
+        return NULL;
+    }
     
-    if (PyModule_AddObject(m, "CrousEncoder", (PyObject *)&CrousEncoderType) < 0) 
-        goto fail;
-    if (PyModule_AddObject(m, "CrousDecoder", (PyObject *)&CrousDecoderType) < 0) 
-        goto fail;
+    /* Initialize custom serializer/decoder registries */
+    custom_serializers = PyDict_New();
+    custom_decoders = PyDict_New();
+    type_to_tag = PyDict_New();
     
-    // version flex
-    if (PyModule_AddStringConstant(m, "__version__", "2.0.0") < 0) goto fail;
-    if (PyModule_AddStringConstant(m, "__author__", "Crous Contributors") < 0) 
-        goto fail;
+    /* Initialize registry lock for thread-safety (C-3 fix) */
+    registry_lock = PyThread_allocate_lock();
+    if (!registry_lock) {
+        Py_DECREF(m);
+        return NULL;
+    }
     
     return m;
-    
-fail:
-    Py_XDECREF(m);
-    return NULL;
 }

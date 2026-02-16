@@ -1,0 +1,48 @@
+*.o
+*.so
+*.dylib
+*.node
+*.a
+*.lib
+*.obj
+*.exp
+*.pdb
+*.ilk
+
+# Build directories
+build/
+dist/
+lib/
+out/
+
+# Node modules
+node_modules/
+
+# NPM
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+
+# Test output
+test_output.crous
+example_output.crous
+*.test.crous
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Gyp
+.deps/
+*.dblite
+*.Makefile
+
+# Platform specific
+*.exe
+*.dll
+Thumbs.db

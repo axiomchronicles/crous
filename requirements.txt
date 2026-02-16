@@ -1,3 +1,0 @@
-# Runtime dependencies
-# Crous has no external runtime dependencies
-# It uses only Python standard library and C extensions

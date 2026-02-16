@@ -8,6 +8,10 @@ import platform
 
 here = os.path.abspath(os.path.dirname(__file__))
 
+# Read version from single source of truth
+with open(os.path.join(here, 'VERSION'), 'r') as vf:
+    __version__ = vf.read().strip()
+
 
 class build_ext(_build_ext):
     """Custom build extension to copy compiled .so files to package directory."""
@@ -18,7 +22,7 @@ class build_ext(_build_ext):
         pattern = os.path.join(build_lib, 'crous', 'crous*.so')
         
         for so_file in glob.glob(pattern):
-            dest = os.path.join(here, os.path.basename(so_file))
+            dest = os.path.join(here, 'crous', os.path.basename(so_file))
             print(f"Copying {so_file} to {dest}")
             shutil.copy2(so_file, dest)
     
@@ -34,10 +38,21 @@ if os.path.exists(readme_path):
 crous_extension = Extension(
     'crous.crous',                  
     sources=[
-        'crous/pycrous.c',      
-        'crous/crous.c',        
+        'crous/pycrous.c',
+        'crous/src/c/core/errors.c',
+        'crous/src/c/core/arena.c',
+        'crous/src/c/core/value.c',
+        'crous/src/c/core/version.c',
+        'crous/src/c/utils/token.c',
+        'crous/src/c/lexer/lexer.c',
+        'crous/src/c/parser/parser.c',
+        'crous/src/c/binary/binary.c',
+        'crous/src/c/flux/flux_lexer.c',
+        'crous/src/c/flux/flux_parser.c',
+        'crous/src/c/flux/flux_serializer.c',
+        'crous/src/c/crout/crout.c',
     ],
-    include_dirs=['crous'],
+    include_dirs=['crous/include'],
     extra_compile_args=[
         '-O3',                
         '-Wall',              
@@ -49,7 +64,7 @@ crous_extension = Extension(
 
 setup(
     name="crous",
-    version="1.0.0",
+    version=__version__,
     description="Crous: High-performance binary serialization format for Python",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -58,7 +73,7 @@ setup(
     url="https://github.com/axiomchronicles/crous",
     license="MIT",
     
-    packages=find_packages(exclude=["tests", "tests.*", "crous-docx"]),
+    packages=find_packages(exclude=["tests", "tests.*", "crous-docx", "crous.src", "crous.src.*"]),
     
     ext_modules=[crous_extension],
     

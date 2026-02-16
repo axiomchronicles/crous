@@ -140,6 +140,10 @@ crous-docx/.cache/
 crous-docx/yarn.lock
 crous-docx/package-lock.json
 
+# Node.js native addon build artifacts
+nodejs/build/
+*.node
+
 # Project specific
 *.crous
 /build/

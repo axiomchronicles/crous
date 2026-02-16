@@ -15,7 +15,6 @@ from pathlib import Path
 class TestTaggedTypeSupport:
     """Test support for tagged types."""
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_datetime_serialization(self):
         """Test that datetime can be serialized with custom serializer."""
         def datetime_serializer(obj):
@@ -32,7 +31,6 @@ class TestTaggedTypeSupport:
         finally:
             crous.unregister_serializer(datetime)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_date_serialization(self):
         """Test that date can be serialized with custom serializer."""
         def date_serializer(obj):
@@ -49,7 +47,6 @@ class TestTaggedTypeSupport:
         finally:
             crous.unregister_serializer(date)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_decimal_serialization(self):
         """Test that Decimal can be serialized."""
         def decimal_serializer(obj):
@@ -66,7 +63,6 @@ class TestTaggedTypeSupport:
         finally:
             crous.unregister_serializer(Decimal)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_uuid_serialization(self):
         """Test that UUID can be serialized."""
         def uuid_serializer(obj):
@@ -83,7 +79,6 @@ class TestTaggedTypeSupport:
         finally:
             crous.unregister_serializer(uuid.UUID)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_set_serialization(self):
         """Test that set can be serialized."""
         def set_serializer(obj):
@@ -102,7 +97,6 @@ class TestTaggedTypeSupport:
         finally:
             crous.unregister_serializer(set)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_frozenset_serialization(self):
         """Test that frozenset can be serialized."""
         def frozenset_serializer(obj):
@@ -120,7 +114,6 @@ class TestTaggedTypeSupport:
         finally:
             crous.unregister_serializer(frozenset)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_path_serialization(self):
         """Test that pathlib.Path can be serialized."""
         def path_serializer(obj):

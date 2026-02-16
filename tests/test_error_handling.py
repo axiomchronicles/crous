@@ -91,17 +91,22 @@ class TestEncodeErrors:
             crous.dumps(data)
 
     def test_unsupported_type_set(self):
-        """Test that set cannot be encoded without custom serializer."""
+        """Test that set is encoded as tagged list and roundtrips correctly."""
         data = {1, 2, 3}
-        # Should raise CrousEncodeError
-        with pytest.raises(crous.CrousEncodeError):
-            crous.dumps(data)
+        # Sets are now supported via tagged values
+        encoded = crous.dumps(data)
+        decoded = crous.loads(encoded)
+        assert decoded == data
+        assert isinstance(decoded, set)
 
     def test_unsupported_type_frozenset(self):
-        """Test that frozenset cannot be encoded without custom serializer."""
+        """Test that frozenset is encoded as tagged list and roundtrips correctly."""
         data = frozenset([1, 2, 3])
-        with pytest.raises(crous.CrousEncodeError):
-            crous.dumps(data)
+        # Frozensets are now supported via tagged values
+        encoded = crous.dumps(data)
+        decoded = crous.loads(encoded)
+        assert decoded == data
+        assert isinstance(decoded, frozenset)
 
     def test_unsupported_type_datetime(self):
         """Test that datetime cannot be encoded without custom serializer."""

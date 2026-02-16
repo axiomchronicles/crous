@@ -3,17 +3,30 @@ crous: High-performance binary serialization for Python
 
 This module provides complete Crous serialization with full IDE support.
 
+Version: 2.0.0
+
 Public API:
-    - dumps(obj, *, default=None, encoder=None, allow_custom=True) -> bytes
-    - dump(obj, fp, *, default=None) -> None
-    - loads(data, *, decoder=None, object_hook=None) -> object
-    - load(fp, *, object_hook=None) -> object
-    - CrousEncoder: Encoder class
-    - CrousDecoder: Decoder class
-    - register_serializer(typ, func) -> None
-    - unregister_serializer(typ) -> None
-    - register_decoder(tag, func) -> None
-    - unregister_decoder(tag) -> None
+    Serialization:
+        - dumps(obj, *, default=None, encoder=None, allow_custom=True) -> bytes
+        - dump(obj, fp, *, default=None) -> None
+        - loads(data, *, decoder=None, object_hook=None) -> object
+        - load(fp, *, object_hook=None) -> object
+    
+    Classes:
+        - CrousEncoder: Encoder class for custom serialization
+        - CrousDecoder: Decoder class for custom deserialization
+    
+    Custom Serializers:
+        - register_serializer(typ, func) -> None
+        - unregister_serializer(typ) -> None
+        - register_decoder(tag, func) -> None
+        - unregister_decoder(tag) -> None
+    
+    Version Control:
+        - version_info() -> VersionInfo
+        - check_compatibility(data) -> CompatibilityResult
+        - __version__: Version string
+        - __version_info__: Full version information tuple
 
 Exceptions:
     - CrousError: Base exception
@@ -21,7 +34,8 @@ Exceptions:
     - CrousDecodeError: Decoding errors
 
 Supported types:
-    None, bool, int, float, str, bytes, list, dict
+    Built-in: None, bool, int, float, str, bytes, list, dict, tuple
+    Via tagged values: set, frozenset, datetime, date, time, Decimal, UUID
 
 File I/O:
     Both dump() and load() accept:
@@ -48,6 +62,15 @@ Examples:
     >>>
     >>> with open('output.crous', 'rb') as f:
     ...     result = crous.load(f)
+    >>>
+    >>> # Version checking
+    >>> crous.version_info()
+    VersionInfo(major=2, minor=0, patch=0, ...)
+    >>>
+    >>> # Compatibility checking
+    >>> result = crous.check_compatibility(binary_data)
+    >>> if result.is_compatible:
+    ...     data = crous.loads(binary_data)
 """
 
 import os
@@ -59,6 +82,34 @@ try:
 except ImportError:
     # Fallback for development without compiled C extension
     import crous as _crous_ext
+
+# Import version module
+from .version import (
+    # Version info
+    VERSION_MAJOR,
+    VERSION_MINOR,
+    VERSION_PATCH,
+    VERSION_STRING,
+    VERSION_TUPLE,
+    VERSION_HEX,
+    WIRE_VERSION_CURRENT,
+    WIRE_VERSION_MIN_READ,
+    WIRE_VERSION_MAX_READ,
+    # Classes
+    VersionInfo,
+    SemanticVersion,
+    Feature,
+    Compatibility,
+    Header,
+    CompatibilityResult,
+    DeprecationInfo,
+    # Functions
+    get_version_info,
+    check_compatibility,
+    register_deprecation,
+    deprecated,
+    migrate,
+)
 
 # Re-export C extension functions directly
 dumps = _crous_ext.dumps
@@ -73,27 +124,71 @@ CrousError = _crous_ext.CrousError
 CrousEncodeError = _crous_ext.CrousEncodeError
 CrousDecodeError = _crous_ext.CrousDecodeError
 
+# CROUT text format
+dumps_text = _crous_ext.dumps_text
+loads_text = _crous_ext.loads_text
+text_to_flux = _crous_ext.text_to_flux
+flux_to_text = _crous_ext.flux_to_text
+
 __all__ = [
+    # Serialization
     "dumps",
     "dump",
     "loads",
     "load",
     "dumps_stream",
     "loads_stream",
+    # Classes
     "CrousEncoder",
     "CrousDecoder",
+    # Custom serializers
     "register_serializer",
     "unregister_serializer",
     "register_decoder",
     "unregister_decoder",
+    # Exceptions
     "CrousError",
     "CrousEncodeError",
     "CrousDecodeError",
+    # CROUT text format
+    "dumps_text",
+    "loads_text",
+    "text_to_flux",
+    "flux_to_text",
+    # Version info
+    "version_info",
+    "check_compatibility",
+    "VersionInfo",
+    "SemanticVersion",
+    "Feature",
+    "Compatibility",
+    "Header",
+    "CompatibilityResult",
 ]
 
-__version__ = "2.0.0"
+# Version information
+__version__ = VERSION_STRING
+__version_info__ = VERSION_TUPLE
 __author__ = "Crous Contributors"
 __license__ = "MIT"
+
+
+def version_info() -> VersionInfo:
+    """
+    Get complete version information.
+    
+    Returns:
+        VersionInfo object with all version details.
+        
+    Example:
+        >>> import crous
+        >>> info = crous.version_info()
+        >>> print(f"CROUS v{info.string}")
+        CROUS v2.0.0
+        >>> info.supports_feature(crous.Feature.TAGGED)
+        True
+    """
+    return get_version_info()
 
 
 def dump(
@@ -285,6 +380,7 @@ def _ensure_api_compatibility() -> None:
         "register_serializer", "unregister_serializer",
         "register_decoder", "unregister_decoder",
         "CrousError", "CrousEncodeError", "CrousDecodeError",
+        "dumps_text", "loads_text", "text_to_flux", "flux_to_text",
     ]
     
     for name in required:
