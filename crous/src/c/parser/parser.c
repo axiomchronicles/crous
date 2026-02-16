@@ -297,14 +297,21 @@ static crous_err_t parse_dict(crous_parser *parser, crous_value **out_value, int
             return CROUS_ERR_SYNTAX;
         }
         
-        /* Extract key string */
-        char *key = malloc(tok.len + 1);
+        /* Extract key string, stripping surrounding quotes */
+        const char *key_src = tok.start;
+        size_t key_len = tok.len;
+        if (key_len >= 2 && (key_src[0] == '"' || key_src[0] == '\'') &&
+            key_src[key_len - 1] == key_src[0]) {
+            key_src++;
+            key_len -= 2;
+        }
+        char *key = malloc(key_len + 1);
         if (!key) {
             crous_value_free_tree(dict);
             return CROUS_ERR_OOM;
         }
-        memcpy(key, tok.start, tok.len);
-        key[tok.len] = '\0';
+        memcpy(key, key_src, key_len);
+        key[key_len] = '\0';
         
         tok = crous_lexer_next(parser->lexer);
         if (tok.type != CROUS_TOK_COLON) {
@@ -390,6 +397,7 @@ static crous_err_t parse_value(crous_parser *parser, crous_value **out_value, in
         case CROUS_TOK_INT: {
             int64_t val = 0;
             char *endptr = NULL;
+            errno = 0;
             val = strtoll(tok.start, &endptr, 10);
             if (errno == ERANGE) return CROUS_ERR_DECODE;
             
@@ -400,6 +408,7 @@ static crous_err_t parse_value(crous_parser *parser, crous_value **out_value, in
         }
         
         case CROUS_TOK_FLOAT: {
+            errno = 0;
             double val = strtod(tok.start, NULL);
             if (errno == ERANGE) return CROUS_ERR_DECODE;
             

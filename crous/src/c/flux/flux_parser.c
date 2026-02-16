@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 /* ============================================================================
    FLUX PARSER IMPLEMENTATION
@@ -93,6 +94,7 @@ static crous_value* parse_scalar(flux_parser_t *parser, crous_err_t *err) {
             break;
             
         case FLUX_TOKEN_INT: {
+            errno = 0;
             int64_t val = strtoll(token->value, NULL, 10);
             v = crous_value_new_int(val);
             advance(parser);
@@ -100,6 +102,7 @@ static crous_value* parse_scalar(flux_parser_t *parser, crous_err_t *err) {
         }
             
         case FLUX_TOKEN_FLOAT: {
+            errno = 0;
             double val = strtod(token->value, NULL);
             v = crous_value_new_float(val);
             advance(parser);
@@ -155,10 +158,14 @@ static crous_value* parse_record(flux_parser_t *parser, crous_err_t *err) {
             return NULL;
         }
         
-        /* Get key */
-        char key_buf[256];
-        size_t key_len = (parser->current_token->value_len < 255) ? 
-                         parser->current_token->value_len : 255;
+        /* Get key (dynamic allocation to avoid truncation) */
+        size_t key_len = parser->current_token->value_len;
+        char *key_buf = malloc(key_len + 1);
+        if (!key_buf) {
+            *err = CROUS_ERR_OOM;
+            crous_value_free_tree(record);
+            return NULL;
+        }
         memcpy(key_buf, parser->current_token->value, key_len);
         key_buf[key_len] = '\0';
         advance(parser);
@@ -167,6 +174,7 @@ static crous_value* parse_record(flux_parser_t *parser, crous_err_t *err) {
         if (!match(parser, FLUX_TOKEN_COLON)) {
             set_error(parser, "Expected ':' after key");
             *err = CROUS_ERR_DECODE;
+            free(key_buf);
             crous_value_free_tree(record);
             return NULL;
         }
@@ -174,6 +182,7 @@ static crous_value* parse_record(flux_parser_t *parser, crous_err_t *err) {
         /* Parse value */
         crous_value *val = parse_value(parser, err);
         if (*err != CROUS_OK) {
+            free(key_buf);
             crous_value_free_tree(record);
             return NULL;
         }
@@ -181,10 +190,12 @@ static crous_value* parse_record(flux_parser_t *parser, crous_err_t *err) {
         /* Add to dict */
         if (crous_value_dict_set_binary(record, key_buf, key_len, val) != CROUS_OK) {
             *err = CROUS_ERR_OOM;
+            free(key_buf);
             crous_value_free_tree(record);
             crous_value_free_tree(val);
             return NULL;
         }
+        free(key_buf);
         
         /* Consume newline */
         if (parser->current_token->type == FLUX_TOKEN_NEWLINE) {

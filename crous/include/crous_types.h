@@ -125,10 +125,10 @@ struct crous_value {
    ============================================================================ */
 
 #define CROUS_MAX_DEPTH 256
-#define CROUS_MAX_STRING_BYTES (1UL << 30)
-#define CROUS_MAX_BYTES_SIZE (1UL << 30)
-#define CROUS_MAX_LIST_SIZE (1UL << 30)
-#define CROUS_MAX_DICT_SIZE (1UL << 30)
+#define CROUS_MAX_STRING_BYTES (1UL << 26)  /* 64 MB */
+#define CROUS_MAX_BYTES_SIZE (1UL << 26)    /* 64 MB */
+#define CROUS_MAX_LIST_SIZE (1UL << 26)     /* 64 MB */
+#define CROUS_MAX_DICT_SIZE (1UL << 26)     /* 64 MB */
 
 #define CROUS_MAGIC_0 0x43  /* 'C' */
 #define CROUS_MAGIC_1 0x52  /* 'R' */

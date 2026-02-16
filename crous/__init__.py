@@ -124,6 +124,12 @@ CrousError = _crous_ext.CrousError
 CrousEncodeError = _crous_ext.CrousEncodeError
 CrousDecodeError = _crous_ext.CrousDecodeError
 
+# CROUT text format
+dumps_text = _crous_ext.dumps_text
+loads_text = _crous_ext.loads_text
+text_to_flux = _crous_ext.text_to_flux
+flux_to_text = _crous_ext.flux_to_text
+
 __all__ = [
     # Serialization
     "dumps",
@@ -144,6 +150,11 @@ __all__ = [
     "CrousError",
     "CrousEncodeError",
     "CrousDecodeError",
+    # CROUT text format
+    "dumps_text",
+    "loads_text",
+    "text_to_flux",
+    "flux_to_text",
     # Version info
     "version_info",
     "check_compatibility",
@@ -369,6 +380,7 @@ def _ensure_api_compatibility() -> None:
         "register_serializer", "unregister_serializer",
         "register_decoder", "unregister_decoder",
         "CrousError", "CrousEncodeError", "CrousDecodeError",
+        "dumps_text", "loads_text", "text_to_flux", "flux_to_text",
     ]
     
     for name in required:

@@ -10,5 +10,6 @@
 #include "crous_parser.h"
 #include "crous_value.h"
 #include "crous_binary.h"
+#include "crous_crout.h"
 
 #endif /* CROUS_H */

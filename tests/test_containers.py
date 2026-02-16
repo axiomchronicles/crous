@@ -253,9 +253,8 @@ class TestDicts:
 
 
 class TestTuples:
-    """Test tuple handling - currently not supported by Crous."""
+    """Test tuple handling - tuples are natively supported by Crous."""
 
-    @pytest.mark.skip(reason="Tuples not supported by Crous format")
     def test_tuple_basic(self):
         """Test that tuples serialize and deserialize."""
         # Tuples are not natively supported; use lists instead
@@ -264,7 +263,6 @@ class TestTuples:
         result = crous.loads(binary)
         assert list(result) == [1, 2, 3]
 
-    @pytest.mark.skip(reason="Tuples not supported by Crous format")
     def test_tuple_mixed_types(self):
         """Test tuple with mixed types."""
         data = (1, 'two', 3.0, None)
@@ -272,7 +270,6 @@ class TestTuples:
         result = crous.loads(binary)
         assert list(result) == [1, 'two', 3.0, None]
 
-    @pytest.mark.skip(reason="Tuples not supported by Crous format")
     def test_nested_tuples(self):
         """Test nested tuples."""
         data = ((1, 2), (3, 4))

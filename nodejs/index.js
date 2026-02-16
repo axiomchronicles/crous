@@ -26,7 +26,7 @@ try {
 
 // Version information
 const VERSION = {
-    major: 1,
+    major: 2,
     minor: 0,
     patch: 0,
     get string() {

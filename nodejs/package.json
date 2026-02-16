@@ -1,6 +1,6 @@
 {
   "name": "crous",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "Crous: High-performance binary serialization format for Node.js",
   "main": "index.js",
   "types": "index.d.ts",

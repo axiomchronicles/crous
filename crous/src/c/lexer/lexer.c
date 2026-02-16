@@ -74,7 +74,7 @@ static crous_token_t scan_number(crous_lexer *lexer) {
     }
     
     /* Scan digits */
-    while (lexer->pos < lexer->input_len && isdigit(lexer->input[lexer->pos])) {
+    while (lexer->pos < lexer->input_len && isdigit((unsigned char)lexer->input[lexer->pos])) {
         lexer->pos++;
         lexer->col++;
     }
@@ -84,7 +84,7 @@ static crous_token_t scan_number(crous_lexer *lexer) {
         lexer->pos++;
         lexer->col++;
         
-        while (lexer->pos < lexer->input_len && isdigit(lexer->input[lexer->pos])) {
+        while (lexer->pos < lexer->input_len && isdigit((unsigned char)lexer->input[lexer->pos])) {
             lexer->pos++;
             lexer->col++;
         }
@@ -99,7 +99,7 @@ static crous_token_t scan_number(crous_lexer *lexer) {
                 lexer->col++;
             }
             
-            while (lexer->pos < lexer->input_len && isdigit(lexer->input[lexer->pos])) {
+            while (lexer->pos < lexer->input_len && isdigit((unsigned char)lexer->input[lexer->pos])) {
                 lexer->pos++;
                 lexer->col++;
             }

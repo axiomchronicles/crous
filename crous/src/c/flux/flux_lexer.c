@@ -46,11 +46,11 @@ void flux_lexer_free(flux_lexer_t *lexer) {
 }
 
 static int is_identifier_char(char c) {
-    return isalnum(c) || c == '_';
+    return isalnum((unsigned char)c) || c == '_';
 }
 
 static int is_identifier_start(char c) {
-    return isalpha(c) || c == '_';
+    return isalpha((unsigned char)c) || c == '_';
 }
 
 static void skip_whitespace_same_line(flux_lexer_t *lexer) {
@@ -118,6 +118,10 @@ flux_token_t* flux_lexer_next(flux_lexer_t *lexer) {
         if (lexer->column == 1 && lexer->pos < lexer->text_len && 
             lexer->text[lexer->pos] != '\n') {
             if (indent > lexer->indent_stack[lexer->indent_stack_size - 1]) {
+                if (lexer->indent_stack_size >= 256) {
+                    return make_token(lexer, FLUX_TOKEN_ERROR, 
+                                      "indent depth exceeded", 21);
+                }
                 lexer->indent_stack[lexer->indent_stack_size++] = indent;
                 return make_token(lexer, FLUX_TOKEN_INDENT, NULL, 0);
             } else if (indent < lexer->indent_stack[lexer->indent_stack_size - 1]) {
@@ -202,8 +206,8 @@ flux_token_t* flux_lexer_next(flux_lexer_t *lexer) {
     }
     
     /* Numbers and identifiers */
-    if (isdigit(c) || (c == '-' && lexer->pos + 1 < lexer->text_len && 
-                      isdigit(lexer->text[lexer->pos + 1]))) {
+    if (isdigit((unsigned char)c) || (c == '-' && lexer->pos + 1 < lexer->text_len && 
+                      isdigit((unsigned char)lexer->text[lexer->pos + 1]))) {
         const char *start = lexer->text + lexer->pos;
         if (c == '-') {
             lexer->pos++;
@@ -215,7 +219,7 @@ flux_token_t* flux_lexer_next(flux_lexer_t *lexer) {
         
         while (lexer->pos < lexer->text_len) {
             c = lexer->text[lexer->pos];
-            if (isdigit(c)) {
+            if (isdigit((unsigned char)c)) {
                 lexer->pos++;
                 lexer->column++;
             } else if (c == '.' && !has_dot && !has_exp) {

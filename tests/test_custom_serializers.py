@@ -15,7 +15,6 @@ import json
 class TestCustomSerializerRegistration:
     """Test registering custom serializers."""
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_register_serializer_for_datetime(self):
         """Test registering a custom serializer for datetime."""
         def datetime_serializer(obj):
@@ -36,7 +35,6 @@ class TestCustomSerializerRegistration:
             # Unregister after test
             crous.unregister_serializer(datetime)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_register_serializer_for_decimal(self):
         """Test registering a custom serializer for Decimal."""
         def decimal_serializer(obj):
@@ -53,7 +51,6 @@ class TestCustomSerializerRegistration:
         finally:
             crous.unregister_serializer(Decimal)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_register_serializer_for_custom_class(self):
         """Test registering serializer for custom class."""
         class Point:
@@ -75,7 +72,6 @@ class TestCustomSerializerRegistration:
         finally:
             crous.unregister_serializer(Point)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_unregister_serializer(self):
         """Test unregistering a custom serializer."""
         def serializer(obj):
@@ -93,7 +89,6 @@ class TestCustomSerializerRegistration:
 class TestCustomDecoderRegistration:
     """Test registering custom decoders."""
 
-    @pytest.mark.skip(reason="register_decoder not yet implemented in Crous")
     def test_register_decoder_for_tag(self):
         """Test registering a custom decoder for a tag."""
         def my_decoder(data):
@@ -108,7 +103,6 @@ class TestCustomDecoderRegistration:
         finally:
             crous.unregister_decoder(100)
 
-    @pytest.mark.skip(reason="register_decoder not yet implemented in Crous")
     def test_unregister_decoder(self):
         """Test unregistering a decoder."""
         def decoder(data):
@@ -121,7 +115,6 @@ class TestCustomDecoderRegistration:
 class TestSerializerFallback:
     """Test default/fallback behavior for custom serializers."""
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_custom_serializer_not_called_for_builtin(self):
         """Test that custom serializers don't interfere with built-in types."""
         def dummy_serializer(obj):
@@ -137,7 +130,6 @@ class TestSerializerFallback:
         finally:
             crous.unregister_serializer(str)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_multiple_serializers(self):
         """Test registering multiple serializers."""
         def datetime_ser(obj):
@@ -162,7 +154,6 @@ class TestSerializerFallback:
             crous.unregister_serializer(datetime)
             crous.unregister_serializer(Decimal)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_serializer_override(self):
         """Test that registering a new serializer overrides the old one."""
         def ser1(obj):
@@ -184,7 +175,6 @@ class TestSerializerFallback:
 class TestCustomSerializerErrors:
     """Test error handling in custom serializers."""
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_serializer_returns_none(self):
         """Test serializer that returns None."""
         def bad_serializer(obj):
@@ -199,7 +189,6 @@ class TestCustomSerializerErrors:
         finally:
             crous.unregister_serializer(datetime)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_serializer_raises_exception(self):
         """Test serializer that raises exception."""
         def error_serializer(obj):
@@ -231,7 +220,6 @@ class TestDecoderBehavior:
 class TestSerializerRoundTrip:
     """Test round-trip serialization with custom serializers."""
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_datetime_roundtrip_with_serializer(self):
         """Test datetime serialization and deserialization."""
         def datetime_serializer(obj):
@@ -252,7 +240,6 @@ class TestSerializerRoundTrip:
         finally:
             crous.unregister_serializer(datetime)
 
-    @pytest.mark.skip(reason="register_serializer not yet implemented in Crous")
     def test_custom_class_roundtrip(self):
         """Test custom class round-trip with serializers."""
         class Person:

@@ -41,7 +41,7 @@ static crous_err_t serialize_string(flux_text_context_t *ctx, const crous_value 
     /* Check if quoting is needed */
     int needs_quotes = 0;
     for (size_t i = 0; i < len; i++) {
-        if (isspace(data[i]) || strchr(":@[]#\"'", data[i])) {
+        if (isspace((unsigned char)data[i]) || strchr(":@[]#\"'", data[i])) {
             needs_quotes = 1;
             break;
         }

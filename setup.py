@@ -8,6 +8,10 @@ import platform
 
 here = os.path.abspath(os.path.dirname(__file__))
 
+# Read version from single source of truth
+with open(os.path.join(here, 'VERSION'), 'r') as vf:
+    __version__ = vf.read().strip()
+
 
 class build_ext(_build_ext):
     """Custom build extension to copy compiled .so files to package directory."""
@@ -46,6 +50,7 @@ crous_extension = Extension(
         'crous/src/c/flux/flux_lexer.c',
         'crous/src/c/flux/flux_parser.c',
         'crous/src/c/flux/flux_serializer.c',
+        'crous/src/c/crout/crout.c',
     ],
     include_dirs=['crous/include'],
     extra_compile_args=[
@@ -59,7 +64,7 @@ crous_extension = Extension(
 
 setup(
     name="crous",
-    version="1.0.3",
+    version=__version__,
     description="Crous: High-performance binary serialization format for Python",
     long_description=long_description,
     long_description_content_type="text/markdown",

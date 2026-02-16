@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <pythread.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,6 +18,9 @@ static PyObject *CrousDecodeError = NULL;
    CUSTOM SERIALIZER/DECODER REGISTRIES
    ============================================================================ */
 
+/* Lock protecting all registry operations (thread-safety C-3 fix) */
+static PyThread_type_lock registry_lock = NULL;
+
 /* Dictionary mapping Python types to serializer functions */
 static PyObject *custom_serializers = NULL;
 
@@ -28,6 +32,14 @@ static uint32_t next_custom_tag = 100;
 
 /* Dictionary mapping Python types to their assigned tags */
 static PyObject *type_to_tag = NULL;
+
+/* Acquire/release helpers for registry lock */
+static inline void registry_lock_acquire(void) {
+    if (registry_lock) PyThread_acquire_lock(registry_lock, WAIT_LOCK);
+}
+static inline void registry_lock_release(void) {
+    if (registry_lock) PyThread_release_lock(registry_lock);
+}
 
 /* ============================================================================
    FORWARD DECLARATIONS
@@ -49,9 +61,12 @@ static crous_value* try_custom_serializer(PyObject *obj, PyObject *default_func,
                                           crous_err_t *err, int *handled) {
     *handled = 0;
     
+    registry_lock_acquire();
+    
     if (!custom_serializers || PyDict_Size(custom_serializers) == 0) {
         /* No custom serializers registered, try default_func */
         if (!default_func || default_func == Py_None) {
+            registry_lock_release();
             return NULL;
         }
     }
@@ -84,25 +99,32 @@ static crous_value* try_custom_serializer(PyObject *obj, PyObject *default_func,
     }
     
     if (!serializer) {
+        registry_lock_release();
         return NULL;
     }
     
-    *handled = 1;
+    /* Incref serializer before releasing lock so it stays alive */
+    Py_INCREF(serializer);
     
-    /* Call the serializer function */
-    PyObject *result = PyObject_CallFunctionObjArgs(serializer, obj, NULL);
-    if (!result) {
-        *err = CROUS_ERR_ENCODE;
-        return NULL;
-    }
-    
-    /* Get the tag for this type */
+    /* Get the tag for this type while we hold the lock */
     uint32_t tag = 100;  /* Default custom tag */
     if (type_to_tag) {
         PyObject *tag_obj = PyDict_GetItem(type_to_tag, (PyObject *)obj_type);
         if (tag_obj && PyLong_Check(tag_obj)) {
             tag = (uint32_t)PyLong_AsUnsignedLong(tag_obj);
         }
+    }
+    
+    registry_lock_release();
+    
+    *handled = 1;
+    
+    /* Call the serializer function (outside lock to avoid deadlock) */
+    PyObject *result = PyObject_CallFunctionObjArgs(serializer, obj, NULL);
+    Py_DECREF(serializer);
+    if (!result) {
+        *err = CROUS_ERR_ENCODE;
+        return NULL;
     }
     
     /* Recursively convert the result */
@@ -515,21 +537,26 @@ static PyObject* crous_to_pyobj_with_hook(const crous_value *v, PyObject *object
             
             /* Check for custom decoder */
             if (custom_decoders) {
+                registry_lock_acquire();
                 PyObject *tag_key = PyLong_FromUnsignedLong(tag);
+                PyObject *decoder = NULL;
                 if (tag_key) {
-                    PyObject *decoder = PyDict_GetItem(custom_decoders, tag_key);
+                    decoder = PyDict_GetItem(custom_decoders, tag_key);
+                    Py_XINCREF(decoder);  /* prevent it from vanishing */
                     Py_DECREF(tag_key);
+                }
+                registry_lock_release();
+                
+                if (decoder) {
+                    /* Get the inner value as Python object */
+                    PyObject *inner_py = crous_to_pyobj_with_hook(inner, object_hook);
+                    if (!inner_py) { Py_DECREF(decoder); return NULL; }
                     
-                    if (decoder) {
-                        /* Get the inner value as Python object */
-                        PyObject *inner_py = crous_to_pyobj_with_hook(inner, object_hook);
-                        if (!inner_py) return NULL;
-                        
-                        /* Call the decoder */
-                        PyObject *result = PyObject_CallFunctionObjArgs(decoder, inner_py, NULL);
-                        Py_DECREF(inner_py);
-                        return result;
-                    }
+                    /* Call the decoder */
+                    PyObject *result = PyObject_CallFunctionObjArgs(decoder, inner_py, NULL);
+                    Py_DECREF(inner_py);
+                    Py_DECREF(decoder);
+                    return result;
                 }
             }
             
@@ -908,8 +935,57 @@ static PyObject* py_dumps_stream(PyObject *self, PyObject *args, PyObject *kwarg
         return NULL;
     }
     
-    /* Same as dump */
-    return py_dump(self, args, kwargs);
+    /* Use already-parsed arguments directly instead of re-forwarding
+       args/kwargs to py_dump, which would double-parse and could
+       silently corrupt keyword argument binding. */
+    
+    /* Convert Python object to crous value */
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        }
+        return NULL;
+    }
+    
+    /* Encode to binary */
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    err = crous_encode(value, &buf, &size);
+    crous_value_free_tree(value);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+    
+    /* Write to file object */
+    PyObject *write_method = PyObject_GetAttrString(fp, "write");
+    if (!write_method) {
+        PyErr_SetString(PyExc_TypeError, "fp must have a write() method");
+        free(buf);
+        return NULL;
+    }
+    
+    PyObject *bytes_obj = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
+    if (!bytes_obj) {
+        Py_DECREF(write_method);
+        return NULL;
+    }
+    
+    PyObject *result = PyObject_CallFunctionObjArgs(write_method, bytes_obj, NULL);
+    Py_DECREF(bytes_obj);
+    Py_DECREF(write_method);
+    
+    if (!result) {
+        return NULL;
+    }
+    
+    Py_DECREF(result);
+    Py_RETURN_NONE;
 }
 
 static PyObject* py_loads_stream(PyObject *self, PyObject *args, PyObject *kwargs) {
@@ -922,8 +998,48 @@ static PyObject* py_loads_stream(PyObject *self, PyObject *args, PyObject *kwarg
         return NULL;
     }
     
-    /* Same as load */
-    return py_load(self, args, kwargs);
+    /* Use already-parsed arguments directly instead of re-forwarding
+       args/kwargs to py_load. */
+    
+    /* Read from file object */
+    PyObject *read_method = PyObject_GetAttrString(fp, "read");
+    if (!read_method) {
+        PyErr_SetString(PyExc_TypeError, "fp must have a read() method");
+        return NULL;
+    }
+    
+    PyObject *bytes_obj = PyObject_CallFunction(read_method, NULL);
+    Py_DECREF(read_method);
+    
+    if (!bytes_obj) {
+        return NULL;
+    }
+    
+    if (!PyBytes_Check(bytes_obj)) {
+        PyErr_SetString(PyExc_TypeError, "read() must return bytes");
+        Py_DECREF(bytes_obj);
+        return NULL;
+    }
+    
+    const uint8_t *buf = (uint8_t *)PyBytes_AsString(bytes_obj);
+    Py_ssize_t buf_size = PyBytes_Size(bytes_obj);
+    
+    /* Decode from binary */
+    crous_value *value = NULL;
+    crous_err_t err = crous_decode(buf, (size_t)buf_size, &value);
+    
+    Py_DECREF(bytes_obj);
+    
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
+        return NULL;
+    }
+    
+    /* Convert crous value to Python object */
+    PyObject *result = crous_to_pyobj_with_hook(value, object_hook);
+    crous_value_free_tree(value);
+    return result;
 }
 
 /* ============================================================================
@@ -948,31 +1064,36 @@ static PyObject* py_register_serializer(PyObject *self, PyObject *args) {
         return NULL;
     }
     
+    registry_lock_acquire();
+    
     /* Initialize registries if needed */
     if (!custom_serializers) {
         custom_serializers = PyDict_New();
-        if (!custom_serializers) return NULL;
+        if (!custom_serializers) { registry_lock_release(); return NULL; }
     }
     if (!type_to_tag) {
         type_to_tag = PyDict_New();
-        if (!type_to_tag) return NULL;
+        if (!type_to_tag) { registry_lock_release(); return NULL; }
     }
     
     /* Add to registry */
     if (PyDict_SetItem(custom_serializers, type_obj, func) < 0) {
+        registry_lock_release();
         return NULL;
     }
     
     /* Assign a tag to this type */
     PyObject *tag_obj = PyLong_FromUnsignedLong(next_custom_tag++);
-    if (!tag_obj) return NULL;
+    if (!tag_obj) { registry_lock_release(); return NULL; }
     
     if (PyDict_SetItem(type_to_tag, type_obj, tag_obj) < 0) {
         Py_DECREF(tag_obj);
+        registry_lock_release();
         return NULL;
     }
     Py_DECREF(tag_obj);
     
+    registry_lock_release();
     Py_RETURN_NONE;
 }
 
@@ -988,6 +1109,8 @@ static PyObject* py_unregister_serializer(PyObject *self, PyObject *args) {
         return NULL;
     }
     
+    registry_lock_acquire();
+    
     if (custom_serializers) {
         PyDict_DelItem(custom_serializers, type_obj);
         PyErr_Clear();  /* Ignore if key not found */
@@ -998,6 +1121,7 @@ static PyObject* py_unregister_serializer(PyObject *self, PyObject *args) {
         PyErr_Clear();
     }
     
+    registry_lock_release();
     Py_RETURN_NONE;
 }
 
@@ -1014,22 +1138,26 @@ static PyObject* py_register_decoder(PyObject *self, PyObject *args) {
         return NULL;
     }
     
+    registry_lock_acquire();
+    
     /* Initialize registry if needed */
     if (!custom_decoders) {
         custom_decoders = PyDict_New();
-        if (!custom_decoders) return NULL;
+        if (!custom_decoders) { registry_lock_release(); return NULL; }
     }
     
     /* Add to registry */
     PyObject *tag_key = PyLong_FromUnsignedLong(tag);
-    if (!tag_key) return NULL;
+    if (!tag_key) { registry_lock_release(); return NULL; }
     
     if (PyDict_SetItem(custom_decoders, tag_key, func) < 0) {
         Py_DECREF(tag_key);
+        registry_lock_release();
         return NULL;
     }
     
     Py_DECREF(tag_key);
+    registry_lock_release();
     Py_RETURN_NONE;
 }
 
@@ -1040,6 +1168,8 @@ static PyObject* py_unregister_decoder(PyObject *self, PyObject *args) {
         return NULL;
     }
     
+    registry_lock_acquire();
+    
     if (custom_decoders) {
         PyObject *tag_key = PyLong_FromUnsignedLong(tag);
         if (tag_key) {
@@ -1049,7 +1179,133 @@ static PyObject* py_unregister_decoder(PyObject *self, PyObject *args) {
         }
     }
     
+    registry_lock_release();
     Py_RETURN_NONE;
+}
+
+/* ============================================================================
+   CROUT TEXT FORMAT FUNCTIONS
+   ============================================================================ */
+
+static PyObject* py_dumps_text(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    PyObject *obj;
+    PyObject *default_func = NULL;
+    int use_tokens = 1;
+    int pretty = 0;
+    int indent = 2;
+    static char *kwlist[] = {"obj", "default", "use_tokens", "pretty", "indent", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Oppi", kwlist,
+                                      &obj, &default_func, &use_tokens, &pretty, &indent))
+        return NULL;
+
+    crous_err_t err = CROUS_OK;
+    crous_value *value = pyobj_to_crous_with_default(obj, default_func, &err);
+    if (!value) {
+        if (!PyErr_Occurred())
+            PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        return NULL;
+    }
+
+    crout_options_t opts = crout_options_default();
+    opts.use_tokens = use_tokens;
+    opts.pretty = pretty;
+    opts.indent = indent;
+
+    char *buf = NULL;
+    size_t size = 0;
+    err = crout_encode(value, &opts, &buf, &size);
+    crous_value_free_tree(value);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousEncodeError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+
+    PyObject *result = PyUnicode_FromStringAndSize(buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
+}
+
+static PyObject* py_loads_text(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    const char *buf;
+    Py_ssize_t buf_size;
+    PyObject *object_hook = NULL;
+    static char *kwlist[] = {"data", "object_hook", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s#|O", kwlist,
+                                      &buf, &buf_size, &object_hook))
+        return NULL;
+
+    crous_value *value = NULL;
+    crous_err_t err = crout_decode(buf, (size_t)buf_size, &value);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousDecodeError, crous_err_str(err));
+        if (value) crous_value_free_tree(value);
+        return NULL;
+    }
+
+    PyObject *result = crous_to_pyobj_with_hook(value, object_hook);
+    crous_value_free_tree(value);
+    return result;
+}
+
+static PyObject* py_text_to_flux(PyObject *self, PyObject *args) {
+    (void)self;
+    const char *text;
+    Py_ssize_t text_len;
+
+    if (!PyArg_ParseTuple(args, "s#", &text, &text_len))
+        return NULL;
+
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    crous_err_t err = crout_text_to_flux(text, (size_t)text_len, &buf, &size);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+
+    PyObject *result = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
+}
+
+static PyObject* py_flux_to_text(PyObject *self, PyObject *args, PyObject *kwargs) {
+    (void)self;
+    const uint8_t *flux;
+    Py_ssize_t flux_len;
+    int use_tokens = 1;
+    int pretty = 0;
+    static char *kwlist[] = {"data", "use_tokens", "pretty", NULL};
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y#|pp", kwlist,
+                                      &flux, &flux_len, &use_tokens, &pretty))
+        return NULL;
+
+    crout_options_t opts = crout_options_default();
+    opts.use_tokens = use_tokens;
+    opts.pretty = pretty;
+
+    char *buf = NULL;
+    size_t size = 0;
+    crous_err_t err = crout_flux_to_text(flux, (size_t)flux_len, &opts, &buf, &size);
+
+    if (err != CROUS_OK) {
+        PyErr_SetString(CrousError, crous_err_str(err));
+        free(buf);
+        return NULL;
+    }
+
+    PyObject *result = PyUnicode_FromStringAndSize(buf, (Py_ssize_t)size);
+    free(buf);
+    return result;
 }
 
 /* ============================================================================
@@ -1115,6 +1371,37 @@ static PyMethodDef crous_methods[] = {
      "Unregister a custom decoder.\n\n"
      "Args:\n"
      "    tag: Tag identifier to unregister"},
+    {"dumps_text", (PyCFunction)(void(*)(void))py_dumps_text, METH_VARARGS | METH_KEYWORDS,
+     "Encode Python object to CROUT text format.\n\n"
+     "Args:\n"
+     "    obj: Python object to serialize\n"
+     "    default: Optional callable for custom types\n"
+     "    use_tokens: Build token table for repeated keys (default True)\n"
+     "    pretty: Pretty-print with indentation (default False)\n"
+     "    indent: Spaces per indent level (default 2)\n\n"
+     "Returns:\n"
+     "    str: CROUT-encoded text"},
+    {"loads_text", (PyCFunction)(void(*)(void))py_loads_text, METH_VARARGS | METH_KEYWORDS,
+     "Decode CROUT text format to Python object.\n\n"
+     "Args:\n"
+     "    data: CROUT text string to decode\n"
+     "    object_hook: Optional callable for dict post-processing\n\n"
+     "Returns:\n"
+     "    Deserialized Python object"},
+    {"text_to_flux", py_text_to_flux, METH_VARARGS,
+     "Convert CROUT text to FLUX binary.\n\n"
+     "Args:\n"
+     "    data: CROUT text string\n\n"
+     "Returns:\n"
+     "    bytes: FLUX binary data"},
+    {"flux_to_text", (PyCFunction)(void(*)(void))py_flux_to_text, METH_VARARGS | METH_KEYWORDS,
+     "Convert FLUX binary to CROUT text.\n\n"
+     "Args:\n"
+     "    data: FLUX binary bytes\n"
+     "    use_tokens: Build token table (default True)\n"
+     "    pretty: Pretty-print (default False)\n\n"
+     "Returns:\n"
+     "    str: CROUT text"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -1202,6 +1489,13 @@ PyMODINIT_FUNC PyInit_crous(void) {
     custom_serializers = PyDict_New();
     custom_decoders = PyDict_New();
     type_to_tag = PyDict_New();
+    
+    /* Initialize registry lock for thread-safety (C-3 fix) */
+    registry_lock = PyThread_allocate_lock();
+    if (!registry_lock) {
+        Py_DECREF(m);
+        return NULL;
+    }
     
     return m;
 }
