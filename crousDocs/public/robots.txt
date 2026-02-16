@@ -1,0 +1,14 @@
+# robots.txt for Crous Documentation
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://crous.dev/sitemap.xml
+
+# Optimization
+User-agent: *
+Crawl-delay: 0
+
+# Block sensitive paths (if any in future)
+# Disallow: /admin/
+# Disallow: /private/
