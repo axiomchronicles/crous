@@ -1,0 +1,20 @@
+{
+  "name": "Crous - Deterministic Binary Document Format",
+  "short_name": "Crous",
+  "description": "High-performance binary serialization library with Python and Node.js bindings. Smaller than JSON, no schema required.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#02040a",
+  "theme_color": "#22c55e",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["development", "utilities", "productivity"],
+  "screenshots": []
+}
