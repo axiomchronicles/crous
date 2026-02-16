@@ -1,7 +1,8 @@
 [build]
-  command = "npm run build"
-  publish = "build/client"
-  functions = "netlify/functions"
+  base = "crousDocs"
+  command = "npm install && npm run build"
+  publish = "crousDocs/build/client"
+  functions = "crousDocs/netlify/functions"
 
 [build.environment]
   NODE_VERSION = "20"
