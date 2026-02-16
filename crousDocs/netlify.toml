@@ -8,15 +8,13 @@
   NODE_VERSION = "20"
 
 [[redirects]]
-  from = "/*"
-  to = "/.netlify/functions/server"
+  from = "/assets/*"
+  to = "/assets/:splat"
   status = 200
-  force = false
-  conditions = {Header-names = ["x-requested-with"]}
 
 [[redirects]]
   from = "/*"
-  to = "/index.html"
+  to = "/.netlify/functions/server"
   status = 200
 
 [functions]

@@ -1,6 +1,10 @@
-import { createRequestHandler } from "react-router";
+import type { Context } from "@netlify/functions";
 
-export const handler = createRequestHandler({
+export default async (request: Request, context: Context) => {
+  const { createRequestHandler } = await import("react-router");
   // @ts-ignore
-  build: () => import("../../build/server/index.js"),
-});
+  const build = await import("../../build/server/index.js");
+  
+  const handler = createRequestHandler({ build });
+  return handler(request, context);
+};
