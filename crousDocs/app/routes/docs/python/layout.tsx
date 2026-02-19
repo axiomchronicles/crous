@@ -83,7 +83,7 @@ export default function PythonDocsLayout() {
               <PythonIcon className="w-10 h-10" />
               <div>
                 <div className="text-white text-sm font-bold">Python SDK</div>
-                <span className="text-xs font-mono text-crous-400">v2.0.0</span>
+                <span className="text-xs font-mono text-crous-400">v1.0.4</span>
               </div>
             </div>
           </div>
@@ -104,8 +104,8 @@ export default function PythonDocsLayout() {
                         <Link
                           to={item.to}
                           className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${isActive
-                              ? "bg-gradient-to-r from-crous-500/10 to-transparent text-crous-400 font-medium border-l-2 border-crous-500"
-                              : "text-gray-400 hover:text-white hover:bg-white/5"
+                            ? "bg-gradient-to-r from-crous-500/10 to-transparent text-crous-400 font-medium border-l-2 border-crous-500"
+                            : "text-gray-400 hover:text-white hover:bg-white/5"
                             }`}
                         >
                           <Icon className="w-4 h-4 flex-shrink-0" />
@@ -203,7 +203,7 @@ export default function PythonDocsLayout() {
                 <PythonIcon className="w-10 h-10" />
                 <div>
                   <div className="text-white text-sm font-bold">Python SDK</div>
-                  <span className="text-xs font-mono text-crous-400">v2.0.0</span>
+                  <span className="text-xs font-mono text-crous-400">v1.0.4</span>
                 </div>
               </div>
             </div>
@@ -225,8 +225,8 @@ export default function PythonDocsLayout() {
                             to={item.to}
                             onClick={() => setMobileOpen(false)}
                             className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${isActive
-                                ? "bg-gradient-to-r from-crous-500/10 to-transparent text-crous-400 font-medium border-l-2 border-crous-500"
-                                : "text-gray-400 hover:text-white hover:bg-white/5"
+                              ? "bg-gradient-to-r from-crous-500/10 to-transparent text-crous-400 font-medium border-l-2 border-crous-500"
+                              : "text-gray-400 hover:text-white hover:bg-white/5"
                               }`}
                           >
                             <Icon className="w-4 h-4 flex-shrink-0" />

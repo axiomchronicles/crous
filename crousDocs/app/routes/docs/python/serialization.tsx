@@ -2,16 +2,16 @@ import { CodeBlock } from "~/components/CodeBlock";
 import { Callout } from "~/components/Callout";
 import type { Route } from "./+types/serialization";
 
-export function meta({}: Route.MetaArgs) {
+export function meta({ }: Route.MetaArgs) {
   return [
     { title: "Python Serialization Guide - Encoding & Decoding - Crous" },
-    { 
-      name: "description", 
-      content: "Learn Python binary serialization with Crous. Encode and decode Python objects with encode(), decode(), FLUX and CROUT formats. Performance optimization tips." 
+    {
+      name: "description",
+      content: "Learn Python binary serialization with Crous. Encode and decode Python objects with encode(), decode(), FLUX and CROUT formats. Performance optimization tips."
     },
-    { 
-      name: "keywords", 
-      content: "python serialization, binary encoding python, decode python objects, flux format, crout format, python data encoding" 
+    {
+      name: "keywords",
+      content: "python serialization, binary encoding python, decode python objects, flux format, crout format, python data encoding"
     },
     { tagName: "link", rel: "canonical", href: "https://crous.dev/docs/python/serialization" },
   ];
@@ -179,7 +179,7 @@ result = decoder.decode(binary)`}
 
       <h2>FLUX Binary Format</h2>
       <p>
-        As of v2.0.0, Crous uses the FLUX binary format by default. FLUX provides:
+        As of v1.0.4, Crous uses the FLUX binary format by default. FLUX provides:
       </p>
       <ul>
         <li><strong>Zigzag varint integers</strong> — small integers encoded in 1-2 bytes instead of 8</li>

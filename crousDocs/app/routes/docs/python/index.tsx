@@ -2,7 +2,7 @@ import { CodeBlock } from "~/components/CodeBlock";
 import { Callout } from "~/components/Callout";
 import type { Route } from "./+types/index";
 
-export function meta({}: Route.MetaArgs) {
+export function meta({ }: Route.MetaArgs) {
   return [
     { title: "Python SDK Documentation - Crous Binary Serialization" },
     { name: "description", content: "Complete Python SDK documentation for Crous. High-performance binary serialization library with C core. Installation, API reference, and guides." },
@@ -21,7 +21,7 @@ export default function PythonIntro() {
       </p>
 
       <Callout type="info" title="Version 2.0.0">
-        Crous v2.0.0 introduces the FLUX binary format as the default encoding, CROUT text format for human-readable output,
+        Crous v1.0.4 introduces the FLUX binary format as the default encoding, CROUT text format for human-readable output,
         and comprehensive custom serializer support.
       </Callout>
 
@@ -115,7 +115,7 @@ print(f"Decoded: {result}")`}
             <td>FLUX Binary</td>
             <td><code>FLUX</code></td>
             <td>1</td>
-            <td>✅ (v2.0.0+)</td>
+            <td>✅ (v1.0.4+)</td>
           </tr>
           <tr>
             <td>CROUT Text</td>

@@ -3,9 +3,9 @@
 All notable changes to Crous are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v1.0.4.html).
 
-## [2.0.0] - 2024-12-07
+## [1.0.0] - 2024-12-07
 
 ### Added
 - **New binary format v2** with optimized encoding
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - None
 
-## [1.0.0] - 2023-06-15
+## [1.0.1] - 2023-06-15
 
 ### Added
 - Initial release
@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Upgrade Guide
 
-### From 1.0.0 to 2.0.0
+### From 1.0.2
 
 **Breaking Changes:**
 - Binary format is completely different (v1 → v2)
@@ -119,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Release Notes Archive
 
 ### 2.0.0-rc1 (2024-11-30)
-- Release candidate for v2.0.0
+- Release candidate for v1.0.4
 - Final testing and bug fixes
 - Documentation review
 

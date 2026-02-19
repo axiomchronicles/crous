@@ -184,7 +184,7 @@ def version_info() -> VersionInfo:
         >>> import crous
         >>> info = crous.version_info()
         >>> print(f"CROUS v{info.string}")
-        CROUS v2.0.0
+        CROUS v1.0.4
         >>> info.supports_feature(crous.Feature.TAGGED)
         True
     """

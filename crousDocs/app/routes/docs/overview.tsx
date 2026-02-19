@@ -3,16 +3,16 @@ import { ArrowRight } from "lucide-react";
 import { PythonIcon, NodejsIcon } from "~/components/SdkIcons";
 import type { Route } from "./+types/overview";
 
-export function meta({}: Route.MetaArgs) {
+export function meta({ }: Route.MetaArgs) {
   return [
     { title: "Documentation - Crous Binary Serialization Library" },
-    { 
-      name: "description", 
-      content: "Official Crous documentation for Python and Node.js. Learn binary serialization, API reference, streaming, custom types, and performance optimization." 
+    {
+      name: "description",
+      content: "Official Crous documentation for Python and Node.js. Learn binary serialization, API reference, streaming, custom types, and performance optimization."
     },
-    { 
-      name: "keywords", 
-      content: "crous documentation, binary serialization docs, python serialization tutorial, nodejs binary encoding, API reference, data format guide" 
+    {
+      name: "keywords",
+      content: "crous documentation, binary serialization docs, python serialization tutorial, nodejs binary encoding, API reference, data format guide"
     },
     { property: "og:title", content: "Crous Documentation" },
     { property: "og:description", content: "Official documentation for Crous binary serialization library. Python and Node.js guides." },
@@ -54,7 +54,7 @@ export default function DocsOverview() {
                 <div>
                   <h2 className="text-2xl font-bold text-white">Python SDK</h2>
                   <span className="text-xs px-2 py-1 bg-crous-500/10 text-crous-400 rounded-full border border-crous-500/20 font-mono">
-                    v2.0.0
+                    v1.0.4
                   </span>
                 </div>
               </div>
@@ -81,7 +81,7 @@ export default function DocsOverview() {
                 <div>
                   <h2 className="text-2xl font-bold text-white">Node.js SDK</h2>
                   <span className="text-xs px-2 py-1 bg-crous-500/10 text-crous-400 rounded-full border border-crous-500/20 font-mono">
-                    v2.0.0
+                    v1.0.4
                   </span>
                 </div>
               </div>
