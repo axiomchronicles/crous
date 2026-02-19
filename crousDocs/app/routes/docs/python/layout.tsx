@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Outlet, Link, useLocation } from "react-router";
 import {
   BookOpen,
@@ -11,6 +12,8 @@ import {
   Code,
   ArrowLeft,
   ArrowRight,
+  Menu,
+  X,
 } from "lucide-react";
 import { PythonIcon } from "~/components/SdkIcons";
 
@@ -46,6 +49,7 @@ const allPages = sidebarSections.flatMap((s) => s.items);
 export default function PythonDocsLayout() {
   const location = useLocation();
   const currentPath = location.pathname;
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   const currentIndex = allPages.findIndex((p) => p.to === currentPath);
   const prevPage = currentIndex > 0 ? allPages[currentIndex - 1] : null;
@@ -99,11 +103,10 @@ export default function PythonDocsLayout() {
                       <li key={item.to}>
                         <Link
                           to={item.to}
-                          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${
-                            isActive
+                          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${isActive
                               ? "bg-gradient-to-r from-crous-500/10 to-transparent text-crous-400 font-medium border-l-2 border-crous-500"
                               : "text-gray-400 hover:text-white hover:bg-white/5"
-                          }`}
+                            }`}
                         >
                           <Icon className="w-4 h-4 flex-shrink-0" />
                           {item.label}
@@ -119,6 +122,17 @@ export default function PythonDocsLayout() {
 
         {/* Content */}
         <main className="flex-1 min-w-0 px-4 sm:px-6 lg:px-12 py-12 max-w-4xl">
+          {/* Mobile Menu Toggle */}
+          <div className="lg:hidden mb-8">
+            <button
+              onClick={() => setMobileOpen(true)}
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+            >
+              <Menu className="w-5 h-5" />
+              <span className="text-sm font-medium">Menu</span>
+            </button>
+          </div>
+
           <div className="prose-docs">
             <Outlet />
           </div>
@@ -150,6 +164,84 @@ export default function PythonDocsLayout() {
           </div>
         </main>
       </div>
+
+      {/* Mobile Sidebar Overlay */}
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setMobileOpen(false)}
+          />
+
+          {/* Sidebar Panel */}
+          <div className="fixed inset-y-0 left-0 w-[280px] bg-[#09090b] border-r border-white/10 p-6 overflow-y-auto">
+            <div className="flex items-center justify-between mb-8">
+              <span className="text-lg font-bold text-white">Documentation</span>
+              <button
+                onClick={() => setMobileOpen(false)}
+                className="p-2 -mr-2 text-gray-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Back to SDKs */}
+            <Link
+              to="/docs"
+              className="flex items-center gap-2 text-sm text-gray-400 hover:text-white mb-6 transition-colors"
+              onClick={() => setMobileOpen(false)}
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              Back to SDKs
+            </Link>
+
+            {/* SDK Badge */}
+            <div className="relative mb-8 group">
+              <div className="absolute -inset-0.5 bg-gradient-to-r from-crous-500 to-blue-500 rounded-xl blur opacity-20" />
+              <div className="relative flex items-center gap-3 p-3 bg-tubox-card border border-tubox-border rounded-xl">
+                <PythonIcon className="w-10 h-10" />
+                <div>
+                  <div className="text-white text-sm font-bold">Python SDK</div>
+                  <span className="text-xs font-mono text-crous-400">v2.0.0</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Navigation */}
+            <nav className="space-y-6">
+              {sidebarSections.map((section) => (
+                <div key={section.title}>
+                  <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3 px-3">
+                    {section.title}
+                  </h3>
+                  <ul className="space-y-1">
+                    {section.items.map((item) => {
+                      const isActive = currentPath === item.to;
+                      const Icon = item.icon;
+                      return (
+                        <li key={item.to}>
+                          <Link
+                            to={item.to}
+                            onClick={() => setMobileOpen(false)}
+                            className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all ${isActive
+                                ? "bg-gradient-to-r from-crous-500/10 to-transparent text-crous-400 font-medium border-l-2 border-crous-500"
+                                : "text-gray-400 hover:text-white hover:bg-white/5"
+                              }`}
+                          >
+                            <Icon className="w-4 h-4 flex-shrink-0" />
+                            {item.label}
+                          </Link>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </nav>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

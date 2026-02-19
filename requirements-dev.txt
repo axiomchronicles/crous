@@ -1,0 +1,13 @@
+# Development and testing dependencies
+pytest>=7.0.0              # Testing framework
+pytest-cov>=4.0.0          # Code coverage
+pytest-xdist>=3.0.0        # Parallel test execution
+black>=22.0.0              # Code formatter
+flake8>=4.0.0              # Linter
+mypy>=0.950                # Static type checker
+isort>=5.10.0              # Import sorting
+sphinx>=4.5.0              # Documentation
+sphinx-rtd-theme>=1.0.0    # RTD theme
+twine>=3.4.0               # PyPI upload
+wheel>=0.37.0              # Wheel packaging
+setuptools>=60.0.0         # Build system
