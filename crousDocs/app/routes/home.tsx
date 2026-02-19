@@ -27,7 +27,7 @@ import {
   CircuitBoard,
 } from "lucide-react";
 
-export function meta({}: Route.MetaArgs) {
+export function meta({ }: Route.MetaArgs) {
   return [
     { title: "Crous - Deterministic Binary Document Format | Python & Node.js" },
     {
@@ -99,7 +99,7 @@ export default function Home() {
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-crous-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-crous-500" />
                 </span>
-                <span className="font-mono tracking-wide">v2.0.0</span>
+                <span className="font-mono tracking-wide">v1.0.4</span>
                 <span className="text-crous-400 text-xs font-semibold bg-crous-500/15 px-2 py-0.5 rounded-full border border-crous-500/20">
                   STABLE
                 </span>

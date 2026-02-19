@@ -2,7 +2,7 @@ import { CodeBlock } from "~/components/CodeBlock";
 import { Callout } from "~/components/Callout";
 import type { Route } from "./+types/index";
 
-export function meta({}: Route.MetaArgs) {
+export function meta({ }: Route.MetaArgs) {
   return [
     { title: "Node.js SDK Documentation - Crous Binary Serialization" },
     { name: "description", content: "Complete Node.js SDK documentation for Crous. High-performance binary serialization with N-API native bindings. TypeScript support included." },
@@ -22,7 +22,7 @@ export default function NodejsIntro() {
       </p>
 
       <Callout type="info" title="Version 2.0.0">
-        The Node.js SDK v2.0.0 shares the same core C library as the Python SDK, ensuring
+        The Node.js SDK v1.0.4 shares the same core C library as the Python SDK, ensuring
         identical binary output and full interoperability.
       </Callout>
 

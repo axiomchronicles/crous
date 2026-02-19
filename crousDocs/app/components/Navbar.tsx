@@ -52,7 +52,7 @@ export function Navbar() {
                   <PythonIcon className="w-8 h-8" />
                   <div>
                     <div className="font-medium">Python</div>
-                    <div className="text-[11px] text-gray-500">v2.0.0</div>
+                    <div className="text-[11px] text-gray-500">v1.0.4</div>
                   </div>
                 </Link>
                 <Link
@@ -62,7 +62,7 @@ export function Navbar() {
                   <NodejsIcon className="w-8 h-8" />
                   <div>
                     <div className="font-medium">Node.js</div>
-                    <div className="text-[11px] text-gray-500">v2.0.0</div>
+                    <div className="text-[11px] text-gray-500">v1.0.4</div>
                   </div>
                 </Link>
               </div>
